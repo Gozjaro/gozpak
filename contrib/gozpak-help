@@ -1,8 +1,8 @@
 #!/bin/sh -e
 # Read KISS documentation
 
-cd "$KISS_ROOT/usr/share/doc/kiss" 2>/dev/null || {
-    printf 'Documentation is missing from /usr/share/doc/kiss\n'
+cd "$GOZPAK_ROOT/usr/share/doc/gozpak" 2>/dev/null || {
+    printf 'Documentation is missing from /usr/share/doc/gozpak\n'
     exit 1
 }
 
@@ -17,11 +17,11 @@ _q=$1
 # shellcheck disable=2046
 [ "$file" ] || {
     set -f
-    set +f -- $(kiss s "${_q##*/}")
+    set +f -- $(gozpak s "${_q##*/}")
     file=${1:+"$1/README"}
 }
 
-# Fallback to search (allows 'kiss help firefox' to work).
+# Fallback to search (allows 'gozpak help firefox' to work).
 # False positive, intended behavior.
 # shellcheck disable=2046
 [ "$file" ] || {

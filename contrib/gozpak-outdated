@@ -26,7 +26,7 @@ EOF
     )
 
     case $remote in
-        baseinit|baselayout|kiss)
+        baseinit|baselayout|gozpak)
             remote=-
         ;;
 
@@ -106,7 +106,7 @@ EOF
         hack)
             # It might be nice to adopt Repology's naming scheme for
             # fonts as it also makes them self-documenting and easy
-            # to search for ('kiss s font:\*).
+            # to search for ('gozpak s font:\*).
             remote=fonts:hack
         ;;
 
@@ -293,9 +293,9 @@ main() {
     set -e
 
     [ "$1" ] ||
-        die 'usage: kiss [ou]tdated /path/to/repo...'
+        die 'usage: gozpak [ou]tdated /path/to/repo...'
 
-    mkdir -p "${tmp:=${XDG_CACHE_HOME:-"$HOME/.cache"}/kiss/repology}"
+    mkdir -p "${tmp:=${XDG_CACHE_HOME:-"$HOME/.cache"}/gozpak/repology}"
 
     for repo do
         old_pwd=$PWD

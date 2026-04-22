@@ -4,7 +4,7 @@
 # Follow symlinks to any paths.
 case $1 in
     /*)
-        cd -P "$KISS_ROOT${1%/*}"
+        cd -P "$GOZPAK_ROOT${1%/*}"
     ;;
 
     */*)
@@ -17,7 +17,7 @@ case $1 in
 esac
 
 [ -f "$PWD/${1##*/}" ] || {
-    printf 'usage: kiss-owns [/path/to/file]\n' >&2
+    printf 'usage: gozpak-owns [/path/to/file]\n' >&2
     exit 1
 }
 
@@ -25,7 +25,7 @@ esac
 # the match to our search.
 pkg_owns=$(grep -lFx \
     "$PWD/${1##*/}" \
-    "$KISS_ROOT/var/db/kiss/installed/"*/manifest)
+    "$GOZPAK_ROOT/var/db/gozpak/installed/"*/manifest)
 
 
 # Extract the package name from the path above.

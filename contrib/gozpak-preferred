@@ -1,8 +1,8 @@
 #!/bin/sh -e
 # Lists the owners of all files with conflicts
 
-kiss a | while read -r _ path; do
-    if owner=$(kiss owns "$path" 2>/dev/null) && [ "$owner" ]; then
+gozpak a | while read -r _ path; do
+    if owner=$(gozpak owns "$path" 2>/dev/null) && [ "$owner" ]; then
         printf '%s %s\n' "$owner" "$path"
 
     else

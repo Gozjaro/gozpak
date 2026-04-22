@@ -3,7 +3,7 @@
 
 [ "$1" ] || set -- "${PWD##*/}"
 
-cd "$KISS_ROOT/var/db/kiss/installed"
+cd "$GOZPAK_ROOT/var/db/gozpak/installed"
 
 grep -E "^$1( |$)"  -- */depends
 

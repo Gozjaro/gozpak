@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck source=/dev/null
 #
-# Simple package manager written in POSIX shell for https://kisslinux.github.io
+# Gozjaro package manager (gozpak), forked from KISS by Dylan Araps
 #
 # The MIT License (MIT)
 #
@@ -96,7 +96,7 @@ prompt() {
     log "Continue?: Press Enter to continue or Ctrl+C to abort"
 
     # korn-shell does not exit on interrupt of read.
-    equ "$KISS_PROMPT" 0 || read -r _ || exit 1
+    equ "$GOZPAK_PROMPT" 0 || read -r _ || exit 1
 }
 
 mkcd() {
@@ -151,7 +151,7 @@ pkg_owner() {
 }
 
 resolve_path() {
-    _rpath=$KISS_ROOT/${1#/}
+    _rpath=$GOZPAK_ROOT/${1#/}
 
     if cd -P "${_rpath%/*}" 2>/dev/null; then
         _parent=$PWD
@@ -160,15 +160,15 @@ resolve_path() {
         _parent=${_rpath%/*}
     fi
 
-    _rpath=${_parent#"$KISS_ROOT"}/${_rpath##*/}
+    _rpath=${_parent#"$GOZPAK_ROOT"}/${_rpath##*/}
 }
 
 run_hook() {
-    # Run all hooks in KISS_HOOK (a colon separated
+    # Run all hooks in GOZPAK_HOOK (a colon separated
     # list of absolute file paths).
     IFS=:
 
-    for hook in ${KISS_HOOK:-}; do case $hook in *?*)
+    for hook in ${GOZPAK_HOOK:-}; do case $hook in *?*)
         "$hook" "$@" || die "$1 hook failed: '$hook'"
     esac done
 
@@ -277,11 +277,11 @@ pkg_find() {
 
 _pkg_find() {
     # Figure out which repository a package belongs to by searching for
-    # directories matching the package name in $KISS_PATH/*.
-    set -- "$1" "$2" "$3" "${4:-"$KISS_PATH"}"
+    # directories matching the package name in $GOZPAK_PATH/*.
+    set -- "$1" "$2" "$3" "${4:-"$GOZPAK_PATH"}"
     IFS=:
 
-    # Iterate over KISS_PATH, grabbing all directories which match the query.
+    # Iterate over GOZPAK_PATH, grabbing all directories which match the query.
     # Intentional.
     # shellcheck disable=2086
     for _find_path in $4 "${3:-$sys_db}"; do set +f
@@ -292,7 +292,7 @@ _pkg_find() {
 
     unset IFS
 
-    # Show all search results if called from 'kiss search', else store the
+    # Show all search results if called from 'gozpak search', else store the
     # values in variables. If there are 4 arguments, no package has been found.
     case $2-$# in
         *-4) return 1 ;;
@@ -323,7 +323,7 @@ pkg_cache() {
     pkg_find_version "$1"
 
     set +f -- "$bin_dir/$1@$repo_ver-$repo_rel.tar."
-    set -f -- "$1$KISS_COMPRESS" "$1"*
+    set -f -- "$1$GOZPAK_COMPRESS" "$1"*
 
     tar_file=$1
 
@@ -411,7 +411,7 @@ pkg_source() {
         # arg4: resolved source
         run_hook pre-source "$1" "$src" "$_fnr"
 
-        # '$2' is set when this function is called from 'kiss c' and it is used
+        # '$2' is set when this function is called from 'gozpak c' and it is used
         # here to skip calling the Git code.
         case $2$_res in "$2url+"*|git+*)
             mkcd "${_des%/*}"
@@ -484,7 +484,7 @@ pkg_source_tar() {
 
         # Move the parent directory to prevent naming conflicts
         # with the to-be-moved children.
-        mv -f "$dir" "$KISS_PID-$dir"
+        mv -f "$dir" "$GOZPAK_PID-$dir"
 
         # Move all children up a directory level. If the mv command
         # fails, fallback to copying the remainder of the files.
@@ -492,16 +492,16 @@ pkg_source_tar() {
         # We can't use '-exec {} +' with any arguments between
         # the '{}' and '+' as this is not POSIX. We must also
         # use '$0' and '$@' to reference all arguments.
-        find "$KISS_PID-$dir/." ! -name . -prune \
+        find "$GOZPAK_PID-$dir/." ! -name . -prune \
             -exec sh -c 'mv -f "$0" "$@" .' {} + 2>/dev/null ||
 
-        find "$KISS_PID-$dir/." ! -name . -prune \
+        find "$GOZPAK_PID-$dir/." ! -name . -prune \
             -exec sh -c 'cp -fRp "$0" "$@" .' {} +
 
         # Remove the directory now that all files have been
         # transferred out of it. This can't be a simple 'rmdir'
         # as we may leave files in here if any were copied.
-        rm -rf "$KISS_PID-$dir"
+        rm -rf "$GOZPAK_PID-$dir"
     esac done < "$_tmp_file"
 
     # Remove the tarball now that we are done with it.
@@ -578,7 +578,7 @@ pkg_depends() {
 
 pkg_order() {
     # Order a list of packages based on dependence and take into account
-    # pre-built tarballs if this is to be called from 'kiss i'.
+    # pre-built tarballs if this is to be called from 'gozpak i'.
     unset order redro deps
 
     for pkg do case $pkg in
@@ -601,7 +601,7 @@ pkg_order() {
 pkg_strip() {
     # Strip package binaries and libraries. This saves space on the system as
     # well as on the tarballs we ship for installation.
-    [ -f "$mak_dir/$pkg/nostrip" ] || equ "$KISS_STRIP" 0 && return
+    [ -f "$mak_dir/$pkg/nostrip" ] || equ "$GOZPAK_STRIP" 0 && return
 
     log "$1" "Stripping binaries and libraries"
 
@@ -839,14 +839,14 @@ pkg_tar() {
     # NOTE: repo_ comes from caller.
     log "$1" "Creating tarball"
 
-    _tar_file=$bin_dir/$1@$repo_ver-$repo_rel.tar.$KISS_COMPRESS
+    _tar_file=$bin_dir/$1@$repo_ver-$repo_rel.tar.$GOZPAK_COMPRESS
 
     # Use 'cd' to avoid needing tar's '-C' flag which may not be portable
     # across implementations.
     cd "$pkg_dir/$1"
 
     # Create a tarball from the contents of the built package.
-    tar cf - . | case $KISS_COMPRESS in
+    tar cf - . | case $GOZPAK_COMPRESS in
         bz2)  bzip2 -z ;;
         gz)   gzip -6  ;;
         lzma) lzma -z  ;;
@@ -909,7 +909,7 @@ pkg_build_all() {
 
             # Intended behavior.
             # shellcheck disable=2030,2031
-            (export KISS_FORCE=1; args i "$tar_file")
+            (export GOZPAK_FORCE=1; args i "$tar_file")
         else
             set -- "$@" "$pkg"
         fi
@@ -953,13 +953,13 @@ pkg_build_all() {
 
             # Intended behavior.
             # shellcheck disable=2030,2031
-            (export KISS_FORCE=1; args i "$pkg")
+            (export GOZPAK_FORCE=1; args i "$pkg")
         fi
     done
 
     # Intentional, globbing disabled.
     # shellcheck disable=2046,2086
-    ! equ "${build_install:=1}" 1 || ! equ "${KISS_PROMPT:=1}" 1 ||
+    ! equ "${build_install:=1}" 1 || ! equ "${GOZPAK_PROMPT:=1}" 1 ||
         ! prompt "Install built packages? [$explicit]" || (args i $explicit)
 }
 
@@ -978,7 +978,7 @@ pkg_build() {
     # Attempt to create the log file early so any permissions errors are caught
     # before the build starts. 'tee' is run in a pipe and POSIX shell has no
     # pipe-fail causing confusing behavior when tee fails.
-    : > "$log_dir/$1-$time-$KISS_PID"
+    : > "$log_dir/$1-$time-$GOZPAK_PID"
 
     # Call the build script, log the output to the terminal and to a file.
     # There's no PIPEFAIL in POSIX shell so we must resort to tricks like kill.
@@ -987,7 +987,7 @@ pkg_build() {
         # environment variables assuming a generic environment by default.
         #
         # Define DESTDIR and GOPATH to sane defaults as their use is mandatory
-        # in anything using autotools, meson, cmake, etc. Define KISS_ROOT as
+        # in anything using autotools, meson, cmake, etc. Define GOZPAK_ROOT as
         # the sanitized value used internally by the package manager. This is
         # safe to join with other paths.
         AR="${AR:-ar}" \
@@ -999,11 +999,11 @@ pkg_build() {
         RUSTFLAGS="--remap-path-prefix=$PWD=. $RUSTFLAGS" \
         GOFLAGS="-trimpath -modcacherw $GOFLAGS" \
         GOPATH="$PWD/go" \
-        KISS_ROOT="$KISS_ROOT" \
+        GOZPAK_ROOT="$GOZPAK_ROOT" \
         \
         "$repo_dir/build" "$pkg_dir/$1" "$repo_ver" 2>&1 || {
             log "$1" "Build failed"
-            log "$1" "Log stored to $log_dir/$1-$time-$KISS_PID"
+            log "$1" "Log stored to $log_dir/$1-$time-$GOZPAK_PID"
 
             # arg1: build-fail
             # arg2: package name
@@ -1013,11 +1013,11 @@ pkg_build() {
             pkg_clean
             kill 0
         }
-    } | tee "$log_dir/$1-$time-$KISS_PID"
+    } | tee "$log_dir/$1-$time-$GOZPAK_PID"
 
     # Delete the log file if the build succeeded to prevent the directory
     # from filling very quickly with useless logs.
-    equ "$KISS_KEEPLOG" 1 || rm -f "$log_dir/$1-$time-$KISS_PID"
+    equ "$GOZPAK_KEEPLOG" 1 || rm -f "$log_dir/$1-$time-$GOZPAK_PID"
 
     # Copy the repository files to the package directory.
     cp -LRf "$repo_dir" "$pkg_dir/$1/$pkg_db/"
@@ -1125,10 +1125,10 @@ pkg_conflicts() {
 
     # Enable alternatives automatically if it is safe to do so.
     # This checks to see that the package that is about to be installed
-    # doesn't overwrite anything it shouldn't in '/var/db/kiss/installed'.
-    grep -q ":/var/db/kiss/installed/" "$_tmp_file" || safe=1
+    # doesn't overwrite anything it shouldn't in '/var/db/gozpak/installed'.
+    grep -q ":/var/db/gozpak/installed/" "$_tmp_file" || safe=1
 
-    if ! equ "$KISS_CHOICE" 1 && equ "$safe" 1 && [ -s "$_tmp_file" ]; then
+    if ! equ "$GOZPAK_CHOICE" 1 && equ "$safe" 1 && [ -s "$_tmp_file" ]; then
         # This is a novel way of offering an "alternatives" system.
         # It is entirely dynamic and all "choices" are created and
         # destroyed on the fly.
@@ -1141,7 +1141,7 @@ pkg_conflicts() {
         # The package's manifest is then updated to reflect this
         # new location.
         #
-        # The 'kiss alternatives' command parses this directory and
+        # The 'gozpak alternatives' command parses this directory and
         # offers you the CHOICE of *swapping* entries in this
         # directory for those on the filesystem.
         #
@@ -1170,7 +1170,7 @@ pkg_conflicts() {
             }
         done < "$_tmp_file"
 
-        log "$_pkg" "Converted all conflicts to choices (kiss a)"
+        log "$_pkg" "Converted all conflicts to choices (gozpak a)"
 
         # Rewrite the package's manifest to update its location
         # to its new spot (and name) in the choices directory.
@@ -1178,7 +1178,7 @@ pkg_conflicts() {
 
     elif [ -s "$_tmp_file" ]; then
         log "Package '$_pkg' conflicts with another package" "" "!>"
-        log "Run 'KISS_CHOICE=1 kiss i $_pkg' to add conflicts" "" "!>"
+        log "Run 'GOZPAK_CHOICE=1 gozpak i $_pkg' to add conflicts" "" "!>"
         die "as alternatives." "" "!>"
     fi
 }
@@ -1211,7 +1211,7 @@ pkg_swap() {
     [ -f "$sys_ch/$_fnr" ] || [ -h "$sys_ch/$_fnr" ] ||
         die "Alternative '$1 ${2:-null}' doesn't exist"
 
-    if [ -f "$KISS_ROOT$2" ]; then
+    if [ -f "$GOZPAK_ROOT$2" ]; then
         pkg_owner "/${2#/}" ||
             die "File '$2' exists on filesystem but isn't owned"
 
@@ -1219,13 +1219,13 @@ pkg_swap() {
 
         # Convert the current owner to an alternative and rewrite its manifest
         # file to reflect this.
-        cp -Pf "$KISS_ROOT$2" "$sys_ch/$_owns>${_fnr#*>}"
+        cp -Pf "$GOZPAK_ROOT$2" "$sys_ch/$_owns>${_fnr#*>}"
         pkg_manifest_replace "$_owns" "$2" "/$cho_db/$_owns>${_fnr#*>}"
     fi
 
     # Convert the desired alternative to a real file and rewrite the manifest
     # file to reflect this. The reverse of above.
-    mv -f "$sys_ch/$_fnr" "$KISS_ROOT/$2"
+    mv -f "$sys_ch/$_fnr" "$GOZPAK_ROOT/$2"
     pkg_manifest_replace "$1" "/$cho_db/$_fnr" "$2"
 }
 
@@ -1257,7 +1257,7 @@ file_rwx() {
 pkg_install_files() {
     # Copy files and create directories (preserving permissions).
     # The 'test $1' will run with '-z' for overwrite and '-e' for verify.
-    while { read -r file && _file=$KISS_ROOT$file; } do case $file in
+    while { read -r file && _file=$GOZPAK_ROOT$file; } do case $file in
         */)
             # Skip directories if they already exist in the file system.
             # (Think /usr/bin, /usr/lib, etc).
@@ -1291,7 +1291,7 @@ pkg_install_files() {
             else
                 # Construct a temporary filename which is a) unique and
                 # b) identifiable as related to the package manager.
-                __tmp=${_file%/*}/__kiss-tmp-$_pkg-${file##*/}-$KISS_PID
+                __tmp=${_file%/*}/__gozpak-tmp-$_pkg-${file##*/}-$GOZPAK_PID
 
                 # Copy the file to the destination directory with the
                 # temporary name created above.
@@ -1311,7 +1311,7 @@ pkg_remove_files() {
     # functions allows us to stop duplicating code.
     while read -r file; do
         case $file in /etc/?*[!/])
-            sh256 "$KISS_ROOT/$file" >/dev/null
+            sh256 "$GOZPAK_ROOT/$file" >/dev/null
 
             read -r sum_pkg <&3 ||:
 
@@ -1321,7 +1321,7 @@ pkg_remove_files() {
             }
         esac
 
-        _file=${KISS_ROOT:+"$KISS_ROOT/"}${file%%/}
+        _file=${GOZPAK_ROOT:+"$GOZPAK_ROOT/"}${file%%/}
 
         # Queue all directory symlinks for later removal.
         if [ -h "$_file" ] && [ -d "$_file" ]; then
@@ -1346,7 +1346,7 @@ pkg_remove_files() {
 }
 
 pkg_etc() {
-    sh256 "$tar_dir/$_pkg$file" "$KISS_ROOT$file" >/dev/null
+    sh256 "$tar_dir/$_pkg$file" "$GOZPAK_ROOT$file" >/dev/null
 
     sum_new=${hash%%"$newline"*}
     sum_sys=${hash#*"$newline"}
@@ -1401,7 +1401,7 @@ pkg_remove() {
 
     # Intended behavior.
     # shellcheck disable=2030,2031
-    equ "$KISS_FORCE" 1  || pkg_removable "$1"
+    equ "$GOZPAK_FORCE" 1  || pkg_removable "$1"
 
     # arg1: pre-remove
     # arg2: package name
@@ -1500,11 +1500,11 @@ pkg_install() {
     # Naively assume that the existence of a manifest file is all that
     # determines a valid KISS package from an invalid one. This should be a
     # fine assumption to make in 99.99% of cases.
-    [ -f "$PWD/$pkg_db/$_pkg/manifest" ] || die "Not a valid KISS package"
+    [ -f "$PWD/$pkg_db/$_pkg/manifest" ] || die "Not a valid gozpak package"
 
     # Intended behavior.
     # shellcheck disable=2030,2031
-    equ "$KISS_FORCE" 1 || {
+    equ "$GOZPAK_FORCE" 1 || {
         pkg_manifest_validate
         pkg_installable "$_pkg" "$PWD/$pkg_db/$_pkg/depends"
     }
@@ -1573,9 +1573,9 @@ pkg_update() {
     # Create a list of all repositories.
     # Intentional, globbing disabled.
     # shellcheck disable=2046,2086
-    { IFS=:; set -- $KISS_PATH; unset IFS; }
+    { IFS=:; set -- $GOZPAK_PATH; unset IFS; }
 
-    # Update each repository in '$KISS_PATH'.
+    # Update each repository in '$GOZPAK_PATH'.
     for repo do
         if git -C "$repo" rev-parse 'HEAD@{upstream}' >/dev/null 2>&1; then
             repo_type=git
@@ -1646,7 +1646,7 @@ pkg_upgrade() {
 
         # Detect repository orphans (installed packages with no
         # associated repository).
-        case $repo_dir in */var/db/kiss/installed/*)
+        case $repo_dir in */var/db/gozpak/installed/*)
             _repo_orp="$_repo_orp$newline${pkg##*/}"
         esac
 
@@ -1666,15 +1666,15 @@ pkg_upgrade() {
     build_install=0
     prefer_cache=1
 
-    ! contains "$*" kiss || {
+    ! contains "$*" gozpak || {
         log "Detected package manager update"
         log "The package manager will be updated first"
 
         prompt
-        pkg_build_all kiss
+        pkg_build_all gozpak
 
         log "Updated the package manager"
-        log "Re-run 'kiss update' to update your system"
+        log "Re-run 'gozpak update' to update your system"
         return 0
     }
 
@@ -1696,29 +1696,29 @@ pkg_upgrade() {
 
 pkg_clean() {
     # Clean up on exit or error. This removes everything related to the build.
-    # If _KISS_LVL is (1) we are the top-level process - the entire cache will
-    # be removed. If _KISS_LVL is any other value, remove only the tar directory.
-    case ${KISS_DEBUG:-0}-${_KISS_LVL:-1} in
+    # If _GOZPAK_LVL is (1) we are the top-level process - the entire cache will
+    # be removed. If _GOZPAK_LVL is any other value, remove only the tar directory.
+    case ${GOZPAK_DEBUG:-0}-${_GOZPAK_LVL:-1} in
         0-1) rm -rf "$proc" ;;
         0-*) rm -rf "$tar_dir"
     esac
 }
 
 pkg_help_ext() {
-    log 'Installed extensions (kiss-* in PATH)'
+    log 'Installed extensions (gozpak-* in PATH)'
 
     # Intentional, globbing disabled.
     # shellcheck disable=2046,2030,2031
-    set -- $(pkg_find kiss-\* all -x "$PATH")
+    set -- $(pkg_find gozpak-\* all -x "$PATH")
 
     # To align descriptions figure out which extension has the longest
     # name by doing a simple 'name > max ? name : max' on the basename
-    # of the path with 'kiss-' stripped as well.
+    # of the path with 'gozpak-' stripped as well.
     #
     # This also removes any duplicates found in '$PATH', picking the
     # first match.
     for path do 
-        p=${path#*/kiss-}
+        p=${path#*/gozpak-}
 
         case " $seen " in *" $p "*)
             shift
@@ -1739,7 +1739,7 @@ pkg_help_ext() {
         { read -r _ && IFS=\#$IFS read -r _ cmt; } <&3
 
         printf "%b->%b %-${max}s %s\\n" \
-            "$c1" "$c3" "${path#*/kiss-}" "$cmt"
+            "$c1" "$c3" "${path#*/gozpak-}" "$cmt"
     done >&2
 }
 
@@ -1775,7 +1775,7 @@ args() {
     shift "$(($# != 0))"
 
     # Ensure that arguments do not contain invalid characters. Wildcards can
-    # not be used here as they would conflict with kiss extensions.
+    # not be used here as they would conflict with gozpak extensions.
     case $action in
         a|alternatives)
             case $1 in *\**|*\!*|*\[*|*\ *|*\]*|*/*|*"$newline"*)
@@ -1797,9 +1797,9 @@ args() {
 
             # When no arguments are given on the command-line, use the basename
             # of the current directory as the package name and add the parent
-            # directory to the running process' KISS_PATH.
+            # directory to the running process' GOZPAK_PATH.
             case ${action%%"${action#?}"}-$# in [!l]-0)
-                export KISS_PATH=${PWD%/*}:$KISS_PATH
+                export GOZPAK_PATH=${PWD%/*}:$GOZPAK_PATH
                 set -- "${PWD##*/}"
             esac
 
@@ -1807,7 +1807,7 @@ args() {
             # files may differ when repositories change. Removal is not dependent on
             # the state of the repository.
             case $action in r|remove)
-                export KISS_PATH=$sys_db:$KISS_PATH
+                export GOZPAK_PATH=$sys_db:$GOZPAK_PATH
             esac
 
             # Order the argument list based on dependence.
@@ -1819,9 +1819,9 @@ args() {
         ;;
     esac
 
-    # Need to increment _KISS_LVL here to ensure we don't wipe the cache
+    # Need to increment _GOZPAK_LVL here to ensure we don't wipe the cache
     # early by non-asroot invocations.
-    export _KISS_LVL=$((_KISS_LVL + 1))
+    export _GOZPAK_LVL=$((_GOZPAK_LVL + 1))
 
     # Rerun the script as root with a fixed environment if needed. We sadly
     # can't run singular functions as root so this is needed.
@@ -1829,22 +1829,22 @@ args() {
     # Intended behavior.
     # shellcheck disable=2030,2031
     case $action in a|alternatives|i|install|r|remove)
-        if ok "$1" && ! am_owner "$KISS_ROOT/"; then
+        if ok "$1" && ! am_owner "$GOZPAK_ROOT/"; then
             trap_off
 
             as_user env \
                 LOGNAME="$user" \
                 HOME="$HOME" \
                 XDG_CACHE_HOME="$XDG_CACHE_HOME" \
-                KISS_COMPRESS="$KISS_COMPRESS" \
-                KISS_PATH="$KISS_PATH" \
-                KISS_FORCE="$KISS_FORCE" \
-                KISS_ROOT="$KISS_ROOT" \
-                KISS_CHOICE="$KISS_CHOICE" \
-                KISS_COLOR="$KISS_COLOR" \
-                KISS_TMPDIR="$KISS_TMPDIR" \
-                KISS_PID="$KISS_PID" \
-                _KISS_LVL="$_KISS_LVL" \
+                GOZPAK_COMPRESS="$GOZPAK_COMPRESS" \
+                GOZPAK_PATH="$GOZPAK_PATH" \
+                GOZPAK_FORCE="$GOZPAK_FORCE" \
+                GOZPAK_ROOT="$GOZPAK_ROOT" \
+                GOZPAK_CHOICE="$GOZPAK_CHOICE" \
+                GOZPAK_COLOR="$GOZPAK_COLOR" \
+                GOZPAK_TMPDIR="$GOZPAK_TMPDIR" \
+                GOZPAK_PID="$GOZPAK_PID" \
+                _GOZPAK_LVL="$_GOZPAK_LVL" \
                 "$0" "$action" "$@"
 
             trap_on
@@ -1869,7 +1869,7 @@ args() {
         v|version)      printf '5.5.28\n' ;;
 
         '')
-            log 'kiss [a|b|c|d|i|l|r|s|u|U|v] [pkg]...'
+            log 'gozpak [a|b|c|d|i|l|r|s|u|U|v] [pkg]...'
             log 'alternatives List and swap alternatives'
             log 'build        Build packages'
             log 'checksum     Generate checksums'
@@ -1882,34 +1882,34 @@ args() {
             log 'upgrade      Update the system'
             log 'version      Package manager version'
 
-            printf '\nRun "kiss [H|help-ext]" to see all actions\n'
+            printf '\nRun "gozpak [H|help-ext]" to see all actions\n'
         ;;
 
         *)
-            # _KISS_LVL must be reset here so the that any extensions
+            # _GOZPAK_LVL must be reset here so the that any extensions
             # which call the package manager do not increment the value
             # further than the parent instance.
-            pkg_find "kiss-$action*" "" -x "$PATH"
-            _KISS_LVL=0 "$repo_dir" "$@"
+            pkg_find "gozpak-$action*" "" -x "$PATH"
+            _GOZPAK_LVL=0 "$repo_dir" "$@"
         ;;
     esac
 }
 
 create_tmp_dirs() {
     # Root directory.
-    KISS_ROOT=${KISS_ROOT%"${KISS_ROOT##*[!/]}"}
+    GOZPAK_ROOT=${GOZPAK_ROOT%"${GOZPAK_ROOT##*[!/]}"}
 
     # This allows for automatic setup of a KISS chroot and will
     # do nothing on a normal system.
-    mkdir -p "$KISS_ROOT/" 2>/dev/null || :
+    mkdir -p "$GOZPAK_ROOT/" 2>/dev/null || :
 
     # System package database.
-    sys_db=$KISS_ROOT/${pkg_db:=var/db/kiss/installed}
-    sys_ch=$KISS_ROOT/${cho_db:=var/db/kiss/choices}
+    sys_db=$GOZPAK_ROOT/${pkg_db:=var/db/gozpak/installed}
+    sys_ch=$GOZPAK_ROOT/${cho_db:=var/db/gozpak/choices}
 
     # Top-level cache directory.
     cac_dir=${XDG_CACHE_HOME:-"${HOME%"${HOME##*[!/]}"}/.cache"}
-    cac_dir=${cac_dir%"${cac_dir##*[!/]}"}/kiss
+    cac_dir=${cac_dir%"${cac_dir##*[!/]}"}/gozpak
 
     # Persistent cache directories.
     src_dir=$cac_dir/sources
@@ -1917,8 +1917,8 @@ create_tmp_dirs() {
     bin_dir=$cac_dir/bin
 
     # Top-level Temporary cache directory.
-    proc=${KISS_TMPDIR:="$cac_dir/proc"}
-    proc=${proc%"${proc##*[!/]}"}/$KISS_PID
+    proc=${GOZPAK_TMPDIR:="$cac_dir/proc"}
+    proc=${proc%"${proc##*[!/]}"}/$GOZPAK_PID
 
     # Temporary cache directories.
     mak_dir=$proc/build
@@ -1934,9 +1934,9 @@ main() {
     # Globally disable globbing and enable exit-on-error.
     set -ef
 
-    # Color can be disabled via the environment variable KISS_COLOR. Colors are
+    # Color can be disabled via the environment variable GOZPAK_COLOR. Colors are
     # also automatically disabled if output is being used in a pipe/redirection.
-    equ "$KISS_COLOR" 0 || ! [ -t 2 ] || {
+    equ "$GOZPAK_COLOR" 0 || ! [ -t 2 ] || {
         c1='\033[1;33m'
         c2='\033[1;34m'
         c3='\033[m'
@@ -1952,13 +1952,13 @@ main() {
 "
 
     # Defaults for environment variables.
-    : "${KISS_COMPRESS:=gz}"
-    : "${KISS_PID:=$$}"
+    : "${GOZPAK_COMPRESS:=gz}"
+    : "${GOZPAK_PID:=$$}"
     : "${LOGNAME:?POSIX requires LOGNAME be set}"
 
     # Figure out which 'sudo' command to use based on the user's choice or what
     # is available on the system.
-    cmd_su=${KISS_SU:-"$(
+    cmd_su=${GOZPAK_SU:-"$(
         command -v ssu  ||
         command -v sudo ||
         command -v doas ||
@@ -1966,14 +1966,14 @@ main() {
     )"} || cmd_su=su
 
     # Figure out which utility is available to dump elf information.
-    cmd_elf=${KISS_ELF:-"$(
+    cmd_elf=${GOZPAK_ELF:-"$(
         command -v readelf      ||
         command -v eu-readelf   ||
         command -v llvm-readelf
     )"} || cmd_elf=ldd
 
     # Figure out which sha256 utility is available.
-    cmd_sha=${KISS_CHK:-"$(
+    cmd_sha=${GOZPAK_CHK:-"$(
         command -v openssl   ||
         command -v sha256sum ||
         command -v sha256    ||
@@ -1982,7 +1982,7 @@ main() {
     )"} || die "No sha256 utility found"
 
     # Figure out which download utility is available.
-    cmd_get=${KISS_GET:-"$(
+    cmd_get=${GOZPAK_GET:-"$(
         command -v aria2c ||
         command -v axel   ||
         command -v curl   ||

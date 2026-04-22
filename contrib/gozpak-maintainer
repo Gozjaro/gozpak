@@ -3,11 +3,11 @@
 
 # Use the current directory as the package name if no package is given.
 [ "$1" ] || {
-    export KISS_PATH=${PWD%/*}:$KISS_PATH
+    export GOZPAK_PATH=${PWD%/*}:$GOZPAK_PATH
     set -- "${PWD##*/}"
 }
 
-kiss search "$@" | uniq -u | while read -r repo; do cd "$repo"
+gozpak search "$@" | uniq -u | while read -r repo; do cd "$repo"
     m=$(git log -1 version 2>/dev/null) ||:
     m=${m##*Author: }
     m=${m%%>*}

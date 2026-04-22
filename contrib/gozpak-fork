@@ -4,8 +4,8 @@
 pkg=${1:-"${PWD##*/}"}
 num=$(printf %d "${2:-0}")
 
-dir=$(kiss search "$pkg" 2>/dev/null) || {
-    printf 'usage: [kiss-fork [pkg]] [index]\n'
+dir=$(gozpak search "$pkg" 2>/dev/null) || {
+    printf 'usage: [gozpak-fork [pkg]] [index]\n'
     exit 1
 }
 

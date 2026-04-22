@@ -4,7 +4,7 @@
 n='
 '
 
-cd "$KISS_ROOT/var/db/kiss/installed"
+cd "$GOZPAK_ROOT/var/db/gozpak/installed"
 set -- *
 
 l=$n$(
@@ -21,7 +21,7 @@ l=$n$(
 
         # Exclude packages which are not really orphans.
         printf '%s\n' baseinit baselayout busybox bzip2 e2fsprogs gcc \
-                      git grub kiss make musl
+                      git grub gozpak make musl
     } |
 
     # Remove duplicates.

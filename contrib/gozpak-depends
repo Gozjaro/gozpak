@@ -3,11 +3,11 @@
 
 pkg=${1:-"${PWD##*/}"}
 
-kiss list "$pkg" >/dev/null || {
-    printf 'usage: kiss-depends [pkg]\n' >&2
+gozpak list "$pkg" >/dev/null || {
+    printf 'usage: gozpak-depends [pkg]\n' >&2
     exit 1
 }
 
 while read -r dep mak || [ "$dep" ]; do
     printf '%s%s\n' "$dep" "${mak:+ "$mak"}"
-done 2>/dev/null < "$KISS_ROOT/var/db/kiss/installed/$pkg/depends" 
+done 2>/dev/null < "$GOZPAK_ROOT/var/db/gozpak/installed/$pkg/depends" 

@@ -1,0 +1,11 @@
+#!/bin/sh -ef
+# Display all files owned by a package
+
+pkg=${1:-"${PWD##*/}"}
+
+gozpak list "$pkg" >/dev/null || {
+    printf 'usage: gozpak-manifest [pkg]\n' >&2
+    exit 1
+}
+
+cat "$GOZPAK_ROOT/var/db/gozpak/installed/$pkg/manifest" 2>/dev/null

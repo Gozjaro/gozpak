@@ -1,14 +1,8 @@
-|/
-|\ISS LINUX                                          https://kisslinux.github.io
+gozpak - Gozjaro Package Manager
 ________________________________________________________________________________
 
 
-Package Manager
-________________________________________________________________________________
+Package Manager for Gozjaro Linux.
+Forked from KISS (https://kisslinux.github.io) by Dylan Araps.
 
-KISS' tiny package manager.
-
-Documentation:
-
-- https://kisslinux.github.io/package-manager
-- https://kisslinux.github.io/package-system
+gozpak is a tiny, POSIX shell package manager designed for simplicity.
