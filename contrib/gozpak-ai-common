@@ -1,0 +1,206 @@
+#!/bin/sh
+# Shared AI backend abstraction for gozpak AI extensions.
+# Sourced by gozpak-ai-new, gozpak-ai-fix, gozpak-ai-update.
+
+# --- configuration ----------------------------------------------------------
+# GOZPAK_AI_BACKEND  — ollama, llamacpp, claude, openai (default: ollama)
+# GOZPAK_AI_MODEL    — model name (default depends on backend)
+# GOZPAK_AI_API_KEY  — API key for cloud backends (claude, openai)
+# GOZPAK_AI_API_URL  — override endpoint URL
+# GOZPAK_AI_OAUTH_TOKEN — pre-obtained OAuth bearer token
+
+GOZPAK_AI_BACKEND=${GOZPAK_AI_BACKEND:-ollama}
+
+ai_die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+ai_log() {
+    printf '\033[1;33m->\033[m %s\n' "$*" >&2
+}
+
+ai_require_curl() {
+    command -v curl >/dev/null 2>&1 ||
+        ai_die "curl is required for AI features"
+}
+
+# --- backend: ollama ---------------------------------------------------------
+ai_ollama() {
+    _url=${GOZPAK_AI_API_URL:-http://localhost:11434/api/generate}
+    _model=${GOZPAK_AI_MODEL:-llama3}
+
+    ai_log "querying ollama ($GOZPAK_AI_MODEL @ $_url)"
+
+    _resp=$(curl -sf "$_url" \
+        -H 'Content-Type: application/json' \
+        -d "$(cat <<JSON
+{"model": "$_model", "prompt": $(ai_json_escape "$1"), "stream": false}
+JSON
+        )") || ai_die "ollama request failed (is ollama running?)"
+
+    printf '%s\n' "$_resp" | ai_extract_json_field response
+}
+
+# --- backend: llama.cpp -----------------------------------------------------
+ai_llamacpp() {
+    _url=${GOZPAK_AI_API_URL:-http://localhost:8080/completion}
+
+    ai_log "querying llama.cpp ($_url)"
+
+    _resp=$(curl -sf "$_url" \
+        -H 'Content-Type: application/json' \
+        -d "$(cat <<JSON
+{"prompt": $(ai_json_escape "$1"), "n_predict": 4096}
+JSON
+        )") || ai_die "llama.cpp request failed (is the server running?)"
+
+    printf '%s\n' "$_resp" | ai_extract_json_field content
+}
+
+# --- backend: claude (Anthropic) --------------------------------------------
+ai_claude() {
+    _url=${GOZPAK_AI_API_URL:-https://api.anthropic.com/v1/messages}
+    _model=${GOZPAK_AI_MODEL:-claude-sonnet-4-20250514}
+    _key=${GOZPAK_AI_API_KEY:-${ANTHROPIC_API_KEY:-}}
+
+    [ -n "$_key" ] ||
+        ai_die "GOZPAK_AI_API_KEY or ANTHROPIC_API_KEY required for claude backend"
+
+    ai_log "querying Claude ($_model)"
+
+    _resp=$(curl -sf "$_url" \
+        -H 'Content-Type: application/json' \
+        -H "x-api-key: $_key" \
+        -H 'anthropic-version: 2023-06-01' \
+        -d "$(cat <<JSON
+{
+  "model": "$_model",
+  "max_tokens": 4096,
+  "messages": [{"role": "user", "content": $(ai_json_escape "$1")}]
+}
+JSON
+        )") || ai_die "Claude API request failed"
+
+    # Extract text from the first content block.
+    printf '%s\n' "$_resp" | ai_extract_nested_text
+}
+
+# --- backend: openai ---------------------------------------------------------
+ai_openai() {
+    _url=${GOZPAK_AI_API_URL:-https://api.openai.com/v1/chat/completions}
+    _model=${GOZPAK_AI_MODEL:-gpt-4o}
+    _key=${GOZPAK_AI_API_KEY:-${OPENAI_API_KEY:-}}
+
+    [ -n "$_key" ] ||
+        ai_die "GOZPAK_AI_API_KEY or OPENAI_API_KEY required for openai backend"
+
+    ai_log "querying OpenAI ($_model)"
+
+    _resp=$(curl -sf "$_url" \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $_key" \
+        -d "$(cat <<JSON
+{
+  "model": "$_model",
+  "max_tokens": 4096,
+  "messages": [{"role": "user", "content": $(ai_json_escape "$1")}]
+}
+JSON
+        )") || ai_die "OpenAI API request failed"
+
+    printf '%s\n' "$_resp" | ai_extract_nested_text
+}
+
+# --- backend: oauth (generic bearer token) -----------------------------------
+ai_oauth() {
+    _url=${GOZPAK_AI_API_URL:-}
+    _token=${GOZPAK_AI_OAUTH_TOKEN:-}
+    _model=${GOZPAK_AI_MODEL:-}
+
+    [ -n "$_url" ]   || ai_die "GOZPAK_AI_API_URL required for oauth backend"
+    [ -n "$_token" ] || ai_die "GOZPAK_AI_OAUTH_TOKEN required for oauth backend"
+
+    ai_log "querying OAuth endpoint ($_url)"
+
+    _resp=$(curl -sf "$_url" \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $_token" \
+        -d "$(cat <<JSON
+{
+  "model": "$_model",
+  "max_tokens": 4096,
+  "messages": [{"role": "user", "content": $(ai_json_escape "$1")}]
+}
+JSON
+        )") || ai_die "OAuth API request failed"
+
+    printf '%s\n' "$_resp" | ai_extract_nested_text
+}
+
+# --- JSON helpers (minimal, no jq dependency) --------------------------------
+
+ai_json_escape() {
+    # Escape a string for safe embedding in a JSON value.
+    # Handles: backslash, double quote, newlines, tabs.
+    printf '%s' "$1" | sed \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g' \
+        -e 's/	/\\t/g' \
+        -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+    # Wrap in quotes.
+    :
+}
+
+ai_json_escape() {
+    # Full version: output the escaped string wrapped in JSON quotes.
+    _esc=$(printf '%s' "$1" | sed \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g' \
+        -e 's/	/\\t/g' \
+        -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g')
+    printf '"%s"' "$_esc"
+}
+
+ai_extract_json_field() {
+    # Extract a top-level string field from JSON. Naive but works for
+    # simple API responses. Usage: echo '{"response":"hello"}' | ai_extract_json_field response
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+ai_extract_nested_text() {
+    # Extract "text" from Claude/OpenAI style nested responses.
+    # Works for: {"content":[{"text":"..."}]} and {"choices":[{"message":{"content":"..."}}]}
+    # Try Claude format first, then OpenAI.
+    _input=$(cat)
+    _text=$(printf '%s\n' "$_input" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\(.*\)/\1/p' | head -1)
+
+    if [ -z "$_text" ]; then
+        _text=$(printf '%s\n' "$_input" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\(.*\)/\1/p' | head -1)
+    fi
+
+    # Unescape JSON string (basic: \n, \t, \", \\)
+    printf '%s\n' "$_text" | sed \
+        -e 's/\\n/\n/g' \
+        -e 's/\\t/\t/g' \
+        -e 's/\\"/"/g' \
+        -e 's/\\\\/\\/g' \
+        -e 's/"[[:space:]]*}[[:space:]]*\][[:space:]]*}[[:space:]]*$//' \
+        -e 's/"[[:space:]]*}[[:space:]]*\][[:space:]]*}[[:space:]]*,[[:space:]]*".*$//'
+}
+
+# --- main dispatch -----------------------------------------------------------
+
+ai_query() {
+    # Send a prompt to the configured AI backend and print the response.
+    ai_require_curl
+
+    case $GOZPAK_AI_BACKEND in
+        ollama)   ai_ollama   "$1" ;;
+        llamacpp) ai_llamacpp "$1" ;;
+        claude)   ai_claude   "$1" ;;
+        openai)   ai_openai   "$1" ;;
+        oauth)    ai_oauth    "$1" ;;
+        *) ai_die "Unknown AI backend: $GOZPAK_AI_BACKEND (use: ollama, llamacpp, claude, openai, oauth)" ;;
+    esac
+}

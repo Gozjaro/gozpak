@@ -1,0 +1,228 @@
+#!/bin/sh -ef
+# Generate a package recipe from a source tarball URL using AI.
+#
+# Usage: gozpak ai-new <name> <version> <source-url>
+#
+# This downloads the source, inspects the build system, sends the analysis
+# to an AI backend, and writes the recipe files (build, depends, version,
+# sources) into a new directory.
+
+# shellcheck source=gozpak-ai-common
+_dir=$(dirname "$(readlink -f "$0")")
+. "$_dir/gozpak-ai-common"
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '\033[1;33m->\033[m %s\n' "$*" >&2; }
+
+# --- argument parsing --------------------------------------------------------
+[ "$#" -ge 3 ] || die "usage: gozpak ai-new <name> <version> <source-url>"
+
+pkg_name=$1
+pkg_ver=$2
+pkg_url=$3
+
+[ -d "$pkg_name" ] && die "Directory '$pkg_name' already exists"
+
+# --- download and inspect source ---------------------------------------------
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+log "downloading $pkg_url"
+case $(command -v curl >/dev/null && echo curl || echo wget) in
+    curl) curl -fLo "$tmp/source.tar" "$pkg_url" ;;
+    wget) wget -O "$tmp/source.tar" "$pkg_url" ;;
+esac || die "failed to download $pkg_url"
+
+log "extracting source"
+mkdir -p "$tmp/src"
+cd "$tmp/src"
+
+# Detect compression and extract.
+case $pkg_url in
+    *.tar.gz|*.tgz)   gzip  -d < "$tmp/source.tar" | tar xf - ;;
+    *.tar.bz2|*.tbz2) bzip2 -d < "$tmp/source.tar" | tar xf - ;;
+    *.tar.xz|*.txz)   xz    -d < "$tmp/source.tar" | tar xf - ;;
+    *.tar.zst)         zstd  -d < "$tmp/source.tar" | tar xf - ;;
+    *.tar)             tar xf "$tmp/source.tar" ;;
+    *)                 tar xf "$tmp/source.tar" 2>/dev/null ||
+                       die "unknown archive format" ;;
+esac
+
+# If extracted into a single top-level dir, descend into it.
+_entries=$(ls -1)
+_count=$(printf '%s\n' "$_entries" | wc -l)
+if [ "$_count" -eq 1 ] && [ -d "$_entries" ]; then
+    cd "$_entries"
+fi
+
+# --- analyze build system ----------------------------------------------------
+log "analyzing build system"
+
+build_system="unknown"
+build_files=""
+
+for f in configure.ac configure.in CMakeLists.txt meson.build Makefile.am \
+         setup.py pyproject.toml Cargo.toml go.mod SConstruct Makefile; do
+    if [ -f "$f" ]; then
+        build_files="$build_files $f"
+        case $f in
+            configure.ac|configure.in) build_system="autotools" ;;
+            CMakeLists.txt)   build_system="cmake" ;;
+            meson.build)      build_system="meson" ;;
+            Makefile.am)      [ "$build_system" = unknown ] && build_system="autotools" ;;
+            setup.py|pyproject.toml) build_system="python" ;;
+            Cargo.toml)       build_system="cargo" ;;
+            go.mod)           build_system="go" ;;
+            SConstruct)       build_system="scons" ;;
+            Makefile)         [ "$build_system" = unknown ] && build_system="make" ;;
+        esac
+    fi
+done
+
+# Gather build file contents (truncated to avoid token overflow).
+analysis=""
+for f in $build_files; do
+    _content=$(head -100 "$f" 2>/dev/null || true)
+    analysis="$analysis
+=== $f (first 100 lines) ===
+$_content
+"
+done
+
+# Gather file listing.
+file_list=$(find . -maxdepth 2 -type f | head -80 | sort)
+
+# Read README if present.
+readme=""
+for r in README README.md README.rst README.txt; do
+    if [ -f "$r" ]; then
+        readme=$(head -60 "$r" 2>/dev/null || true)
+        break
+    fi
+done
+
+# --- construct AI prompt -----------------------------------------------------
+prompt="You are a Linux package maintainer for Gozjaro Linux (an LFS-based distro).
+Generate a build recipe for the following source package.
+
+Package name: $pkg_name
+Version: $pkg_ver
+Source URL: $pkg_url
+Detected build system: $build_system
+
+File listing (top 80 files):
+$file_list
+
+Build file contents:
+$analysis
+
+README (first 60 lines):
+$readme
+
+Please generate EXACTLY these files, separated by the markers shown:
+
+--- FILE: build ---
+A POSIX shell build script (#!/bin/sh -e) that compiles and installs the package.
+Use \$1 as DESTDIR (the install prefix destination).
+Use standard flags: --prefix=/usr for autotools/cmake/meson.
+Keep it minimal — no comments unless something is non-obvious.
+
+--- FILE: depends ---
+One dependency per line. Only list runtime dependencies you can confidently identify
+from the build files. Use the package names as they would appear in a minimal Linux
+system (e.g., glibc, zlib, openssl, ncurses, etc.). If unsure, leave empty.
+Mark build-only deps with ' make' after the name (e.g., 'cmake make').
+
+--- FILE: sources ---
+The source URL, one per line. Use VERSION as a placeholder for the version number
+if the URL contains it.
+
+Output ONLY the file contents with the --- FILE: markers. No explanations."
+
+# --- query AI ----------------------------------------------------------------
+log "querying $GOZPAK_AI_BACKEND for build recipe"
+response=$(ai_query "$prompt")
+
+# --- parse AI response into files --------------------------------------------
+log "creating package directory: $pkg_name"
+cd "$OLDPWD" 2>/dev/null || cd /
+mkdir -p "$pkg_name"
+
+# Extract each file section from the response.
+extract_section() {
+    # Extract content between "--- FILE: $1 ---" and the next "--- FILE:" or end.
+    printf '%s\n' "$response" | sed -n \
+        "/^--- FILE: $1/,/^--- FILE:/{
+            /^--- FILE:/d
+            p
+        }" | sed '/^```/d'
+}
+
+_build=$(extract_section "build")
+_depends=$(extract_section "depends")
+_sources=$(extract_section "sources")
+
+# Write build file.
+if [ -n "$_build" ]; then
+    printf '%s\n' "$_build" > "$pkg_name/build"
+    chmod +x "$pkg_name/build"
+    log "wrote $pkg_name/build"
+else
+    # Fallback: minimal build script.
+    log "AI didn't produce a build file, writing skeleton"
+    case $build_system in
+        autotools)
+            cat > "$pkg_name/build" <<'BUILD'
+#!/bin/sh -e
+./configure --prefix=/usr
+make
+make DESTDIR="$1" install
+BUILD
+            ;;
+        cmake)
+            cat > "$pkg_name/build" <<'BUILD'
+#!/bin/sh -e
+cmake -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cmake --install build --prefix "$1/usr"
+BUILD
+            ;;
+        meson)
+            cat > "$pkg_name/build" <<'BUILD'
+#!/bin/sh -e
+meson setup build --prefix=/usr
+ninja -C build
+DESTDIR="$1" ninja -C build install
+BUILD
+            ;;
+        *)
+            cat > "$pkg_name/build" <<'BUILD'
+#!/bin/sh -e
+make PREFIX=/usr
+make PREFIX=/usr DESTDIR="$1" install
+BUILD
+            ;;
+    esac
+    chmod +x "$pkg_name/build"
+fi
+
+# Write depends file.
+if [ -n "$_depends" ]; then
+    printf '%s\n' "$_depends" > "$pkg_name/depends"
+    log "wrote $pkg_name/depends"
+fi
+
+# Write sources file.
+if [ -n "$_sources" ]; then
+    printf '%s\n' "$_sources" > "$pkg_name/sources"
+else
+    printf '%s\n' "$pkg_url" > "$pkg_name/sources"
+fi
+log "wrote $pkg_name/sources"
+
+# Write version file.
+printf '%s 1\n' "$pkg_ver" > "$pkg_name/version"
+log "wrote $pkg_name/version"
+
+log "recipe created at $pkg_name/"
+log "review the files, then run: gozpak checksum $pkg_name && gozpak build $pkg_name"
