@@ -1704,6 +1704,231 @@ pkg_clean() {
     esac
 }
 
+# ===========================================================================
+# Remote repository functions (online package management)
+# ===========================================================================
+#
+# Repo index format (repo.index): one package per line, tab-separated fields:
+#   name\tversion\trelease\tsha256\tsize\tdepends\tdescription
+#
+# Mirror config:
+#   GOZPAK_REPOS   — colon-separated list of remote repo URLs
+#   /etc/gozpak/repos.conf — one URL per line (fallback if GOZPAK_REPOS unset)
+
+repo_read_config() {
+    # Build the list of remote repository URLs.
+    unset _repo_urls
+
+    # Prefer the environment variable.
+    if ok "${GOZPAK_REPOS:-}"; then
+        IFS=:
+        for _url in $GOZPAK_REPOS; do
+            ok "$_url" && _repo_urls="$_repo_urls $_url"
+        done
+        unset IFS
+        return 0
+    fi
+
+    # Fall back to the config file.
+    _repo_conf=${GOZPAK_ROOT:-}/etc/gozpak/repos.conf
+
+    [ -f "$_repo_conf" ] || return 0
+
+    while read -r _url; do
+        case $_url in \#*|'') continue ;; esac
+        _repo_urls="$_repo_urls $_url"
+    done < "$_repo_conf"
+}
+
+repo_url_id() {
+    # Generate a filesystem-safe identifier for a URL by replacing
+    # non-alphanumeric characters with underscores. This avoids needing
+    # md5sum/sha256sum just for a directory name.
+    _url_id=$1
+    # protocol
+    _url_id=${_url_id#*://}
+    # Replace /, :, . with _
+    fnr "$_url_id" '/' '_' ':' '_' '.' '_'
+    _url_id=$_fnr
+}
+
+repo_download() {
+    # Download a URL ($1) to a local file ($2) using the configured download
+    # utility. Reuses the same cmd_get abstraction as pkg_source_url.
+    case ${cmd_get##*/} in
+        aria2c|axel) "$cmd_get" -o "$2" "$1" ;;
+               curl) "$cmd_get" -fLo "$2" "$1" ;;
+         wget|wget2) "$cmd_get" -O "$2" "$1" ;;
+    esac
+}
+
+repo_sync() {
+    # Download/refresh repository indices from all configured mirrors.
+    repo_read_config
+
+    null "$_repo_urls" && die "No repositories configured" \
+        "(set GOZPAK_REPOS or create /etc/gozpak/repos.conf)"
+
+    for _url in $_repo_urls; do
+        repo_url_id "$_url"
+        _idx_dir=$repo_cac/$_url_id
+
+        mkdir -p "$_idx_dir"
+
+        log "$_url" "Syncing repository index"
+
+        repo_download "$_url/repo.index" "$_idx_dir/repo.index.tmp" || {
+            war "$_url" "Failed to download repo index"
+            rm -f "$_idx_dir/repo.index.tmp"
+            continue
+        }
+
+        mv -f "$_idx_dir/repo.index.tmp" "$_idx_dir/repo.index"
+
+        # Store the source URL for later use by fetch.
+        printf '%s\n' "$_url" > "$_idx_dir/url"
+
+        # Count packages.
+        _cnt=0
+        while read -r _; do _cnt=$((_cnt + 1)); done < "$_idx_dir/repo.index"
+        log "$_url" "Synced ($_cnt packages)"
+    done
+}
+
+repo_search_pkg() {
+    # Search all cached repo indices for a package ($1).
+    # Sets: _rpkg_name _rpkg_ver _rpkg_rel _rpkg_sha _rpkg_size
+    #       _rpkg_deps _rpkg_desc _rpkg_url _rpkg_idx
+    unset _rpkg_name _rpkg_url
+
+    set +f
+    for _idx in "$repo_cac"/*/repo.index; do set -f
+        [ -f "$_idx" ] || continue
+
+        while IFS='	' read -r _n _v _r _s _sz _dp _ds; do
+            equ "$_n" "$1" || continue
+
+            _rpkg_name=$_n
+            _rpkg_ver=$_v
+            _rpkg_rel=$_r
+            _rpkg_sha=$_s
+            _rpkg_size=$_sz
+            _rpkg_deps=$_dp
+            _rpkg_desc=$_ds
+            _rpkg_idx=${_idx%/*}
+
+            # Read the source URL.
+            read -r _rpkg_url < "$_rpkg_idx/url" 2>/dev/null || _rpkg_url=
+            return 0
+        done < "$_idx"
+    done
+    set -f
+
+    return 1
+}
+
+repo_fetch_pkg() {
+    # Download a binary package tarball from a remote repo.
+    # Expects repo_search_pkg to have been called first.
+    _tar_name="${_rpkg_name}@${_rpkg_ver}-${_rpkg_rel}.tar.${GOZPAK_COMPRESS}"
+    _tar_dest="$bin_dir/$_tar_name"
+
+    # Skip download if we already have a matching tarball.
+    if [ -f "$_tar_dest" ]; then
+        _existing_sha=$(_sh256 "$_tar_dest")
+        _existing_sha=${_existing_sha%% *}
+        if equ "$_existing_sha" "$_rpkg_sha"; then
+            log "$_rpkg_name" "Already cached"
+            return 0
+        fi
+    fi
+
+    log "$_rpkg_name" "Downloading $_tar_name"
+
+    repo_download "$_rpkg_url/$_tar_name" "$_tar_dest.tmp" ||
+        die "$_rpkg_name" "Failed to download from $_rpkg_url"
+
+    # Verify checksum.
+    _dl_sha=$(_sh256 "$_tar_dest.tmp")
+    _dl_sha=${_dl_sha%% *}
+
+    equ "$_dl_sha" "$_rpkg_sha" || {
+        rm -f "$_tar_dest.tmp"
+        die "$_rpkg_name" "Checksum mismatch (expected: $_rpkg_sha, got: $_dl_sha)"
+    }
+
+    mv -f "$_tar_dest.tmp" "$_tar_dest"
+    log "$_rpkg_name" "Downloaded and verified"
+}
+
+repo_get() {
+    # Fetch and install binary packages from remote repositories.
+    for _pkg_name do
+        repo_search_pkg "$_pkg_name" ||
+            die "$_pkg_name" "Not found in any repository (run 'gozpak sync' first)"
+
+        log "$_pkg_name" "$_rpkg_ver-$_rpkg_rel (${_rpkg_desc:-no description})"
+
+        # Check if already installed at same version.
+        if [ -d "$sys_db/$_pkg_name" ]; then
+            read -r _inst_ver _inst_rel 2>/dev/null \
+                < "$sys_db/$_pkg_name/version" || :
+
+            if equ "$_inst_ver" "$_rpkg_ver" && equ "$_inst_rel" "$_rpkg_rel"; then
+                log "$_pkg_name" "Already installed at $_inst_ver-$_inst_rel"
+                continue
+            fi
+
+            log "$_pkg_name" "Upgrading $_inst_ver-$_inst_rel -> $_rpkg_ver-$_rpkg_rel"
+        fi
+
+        # Check dependencies.
+        if ok "$_rpkg_deps" && ! equ "$_rpkg_deps" "-"; then
+            IFS=,
+            for _dep in $_rpkg_deps; do
+                [ -d "$sys_db/$_dep" ] || {
+                    # Try to fetch the dependency from repos too.
+                    log "$_dep" "Required by $_pkg_name, fetching"
+                    repo_get "$_dep"
+                }
+            done
+            unset IFS
+        fi
+
+        repo_fetch_pkg
+
+        # Install using the existing pkg_install which already handles tarballs.
+        pkg_install "$_tar_dest"
+    done
+}
+
+repo_fetch_only() {
+    # Download binary packages without installing.
+    for _pkg_name do
+        repo_search_pkg "$_pkg_name" ||
+            die "$_pkg_name" "Not found in any repository (run 'gozpak sync' first)"
+
+        log "$_pkg_name" "$_rpkg_ver-$_rpkg_rel"
+        repo_fetch_pkg
+        log "$_pkg_name" "Saved to $bin_dir/"
+    done
+}
+
+repo_list_remote() {
+    # List all packages available in synced repositories.
+    set +f
+    for _idx in "$repo_cac"/*/repo.index; do set -f
+        [ -f "$_idx" ] || continue
+
+        read -r _rurl < "${_idx%/*}/url" 2>/dev/null || _rurl="unknown"
+
+        while IFS='	' read -r _n _v _r _ _sz _ _ds; do
+            printf '%s %s-%s %s\n' "$_n" "$_v" "$_r" "${_ds:-}"
+        done < "$_idx"
+    done
+    set -f
+}
+
 pkg_help_ext() {
     log 'Installed extensions (gozpak-* in PATH)'
 
@@ -1828,7 +2053,7 @@ args() {
     #
     # Intended behavior.
     # shellcheck disable=2030,2031
-    case $action in a|alternatives|i|install|r|remove)
+    case $action in a|alternatives|i|install|r|remove|g|get)
         if ok "$1" && ! am_owner "$GOZPAK_ROOT/"; then
             trap_off
 
@@ -1844,6 +2069,7 @@ args() {
                 GOZPAK_COLOR="$GOZPAK_COLOR" \
                 GOZPAK_TMPDIR="$GOZPAK_TMPDIR" \
                 GOZPAK_PID="$GOZPAK_PID" \
+                GOZPAK_REPOS="$GOZPAK_REPOS" \
                 _GOZPAK_LVL="$_GOZPAK_LVL" \
                 "$0" "$action" "$@"
 
@@ -1859,28 +2085,39 @@ args() {
         b|build)        pkg_build_all "$@" ;;
         c|checksum)     for pkg do pkg_checksum "$pkg"; done ;;
         d|download)     for pkg do pkg_source "$pkg"; done ;;
+        f|fetch)        repo_fetch_only "$@" ;;
+        g|get)          repo_get "$@" ;;
         H|help-ext)     pkg_help_ext "$@" ;;
         i|install)      for pkg do pkg_install "$pkg"; done ;;
         l|list)         pkg_list_version "$@" ;;
+        L|list-remote)  repo_list_remote ;;
         r|remove)       for pkg in $redro; do pkg_remove "$pkg"; done ;;
         s|search)       for pkg do pkg_find "$pkg" all; done ;;
+        S|sync)         repo_sync ;;
         u|update)       pkg_update ;;
         U|upgrade)      pkg_upgrade ;;
-        v|version)      printf '5.5.28\n' ;;
+        v|version)      printf '6.0.0\n' ;;
 
         '')
-            log 'gozpak [a|b|c|d|i|l|r|s|u|U|v] [pkg]...'
+            log 'gozpak [a|b|c|d|f|g|i|l|L|r|s|S|u|U|v] [pkg]...'
             log 'alternatives List and swap alternatives'
             log 'build        Build packages'
             log 'checksum     Generate checksums'
             log 'download     Download sources'
+            log 'fetch        Download binary packages (no install)'
+            log 'get          Fetch and install binary packages'
             log 'install      Install packages'
             log 'list         List installed packages'
+            log 'list-remote  List packages in remote repositories'
             log 'remove       Remove packages'
             log 'search       Search for packages'
+            log 'sync         Sync remote repository indices'
             log 'update       Update the system and repositories'
             log 'upgrade      Update the system'
             log 'version      Package manager version'
+            log ''
+            log 'Global flags:'
+            log '  -y, --yes  Skip all confirmation prompts'
 
             printf '\nRun "gozpak [H|help-ext]" to see all actions\n'
         ;;
@@ -1915,6 +2152,7 @@ create_tmp_dirs() {
     src_dir=$cac_dir/sources
     log_dir=$cac_dir/logs/${time%-*}
     bin_dir=$cac_dir/bin
+    repo_cac=$cac_dir/repos
 
     # Top-level Temporary cache directory.
     proc=${GOZPAK_TMPDIR:="$cac_dir/proc"}
@@ -1926,7 +2164,7 @@ create_tmp_dirs() {
     tar_dir=$proc/extract
     tmp_dir=$proc/tmp
 
-    mkdir -p "$src_dir" "$log_dir" "$bin_dir" \
+    mkdir -p "$src_dir" "$log_dir" "$bin_dir" "$repo_cac" \
              "$mak_dir" "$pkg_dir" "$tar_dir" "$tmp_dir"
 }
 
@@ -1993,6 +2231,18 @@ main() {
     # Store the date and time of script invocation to be used as the name of
     # the log files the package manager creates during builds.
     time=$(date +%Y-%m-%d-%H:%M)
+
+    # Parse global flags (--yes/-y) before passing to args().
+    # Strip them from the argument list and set the corresponding env var.
+    unset _args
+    for _a do case $_a in
+        -y|--yes) export GOZPAK_PROMPT=0 ;;
+        *)        _args="${_args+$_args }$_a"
+    esac done
+
+    # Intentional, globbing disabled.
+    # shellcheck disable=2086
+    set -- ${_args:-}
 
     create_tmp_dirs
     trap_on
