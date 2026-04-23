@@ -1,11 +1,18 @@
 #!/bin/sh -e
 # Batch-build packages and collect their tarballs.
 #
-# Usage: gozpak repo-build <pkg1> [pkg2 ...]
-#        gozpak repo-build -f packages.list
+# Usage: gozpak repo-build [-b] [-o outdir] [-f pkglist] [pkg ...]
 #
 # Builds each package using 'gozpak build' and copies the resulting tarballs
 # to the output directory (default: ./repo or GOZPAK_REPO_OUT).
+#
+# Flags:
+#   -b          Bootstrap mode — use a temporary isolated GOZPAK_ROOT with
+#               pre-seeded dependency stubs.  Use this when building on a
+#               non-Gozjaro host (e.g. Debian) where packages are not in
+#               gozpak's installed database.
+#   -f FILE     Read package names from FILE (one per line, # comments ok).
+#   -o DIR      Output directory for tarballs (default: ./repo).
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '\033[1;33m->\033[m %s\n' "$*" >&2; }
@@ -13,14 +20,20 @@ log() { printf '\033[1;33m->\033[m %s\n' "$*" >&2; }
 out_dir=${GOZPAK_REPO_OUT:-./repo}
 bin_dir=${XDG_CACHE_HOME:-"$HOME/.cache"}/gozpak/bin
 from_file=""
+bootstrap=0
 
 # Parse flags.
 while [ "$#" -gt 0 ]; do
     case $1 in
+        -b|--bootstrap) bootstrap=1; shift ;;
         -f) from_file=$2; shift 2 ;;
         -o) out_dir=$2; shift 2 ;;
         -h|--help)
-            printf 'usage: gozpak repo-build [-o outdir] [-f pkglist] [pkg ...]\n'
+            printf 'usage: gozpak repo-build [-b] [-o outdir] [-f pkglist] [pkg ...]\n'
+            printf '\n'
+            printf '  -b  Bootstrap mode (isolated root, pre-seeded deps)\n'
+            printf '  -f  Read package list from file\n'
+            printf '  -o  Output directory (default: ./repo)\n'
             exit 0 ;;
         *)  break ;;
     esac
@@ -36,6 +49,64 @@ if [ -n "$from_file" ]; then
 fi
 
 [ "$#" -gt 0 ] || die "no packages specified"
+
+# --- Auto-detect recipe directory (GOZPAK_PATH) ---
+_detect_repo() {
+    for _d do
+        for _base in "$PWD" ${from_file:+"$(cd "$(dirname "$from_file")" && pwd)"}; do
+            [ -n "$_base" ] && [ -f "$_base/$_d/build" ] && {
+                printf '%s' "$_base"
+                return 0
+            }
+        done
+    done
+    return 1
+}
+
+if _repo_root=$(_detect_repo "$@"); then
+    case ":${GOZPAK_PATH:-}:" in
+        *":$_repo_root:"*) ;;
+        *) export GOZPAK_PATH="$_repo_root${GOZPAK_PATH:+:$GOZPAK_PATH}"
+           log "auto-detected GOZPAK_PATH: $GOZPAK_PATH" ;;
+    esac
+fi
+
+# --- Bootstrap isolation (only with -b) ---
+if [ "$bootstrap" -eq 1 ]; then
+    # Create a temporary GOZPAK_ROOT so that:
+    #  1. Dependency installs don't touch the real host system
+    #  2. We can pre-seed the installed DB to satisfy dependency checks
+    _bootstrap_root=$(mktemp -d "${TMPDIR:-/tmp}/gozpak-repo-build.XXXXXX")
+    _bootstrap_db="$_bootstrap_root/var/db/gozpak/installed"
+    mkdir -p "$_bootstrap_db"
+
+    trap 'rm -rf "$_bootstrap_root"' EXIT INT TERM
+
+    export GOZPAK_ROOT="$_bootstrap_root"
+    log "bootstrap root: $GOZPAK_ROOT"
+
+    # Pre-seed the installed database with stub entries for every package
+    # in the build list. gozpak checks [ -d "$sys_db/$pkg" ] to decide if
+    # a dependency is satisfied — a directory + version file is enough.
+    for pkg do
+        _ver_file=""
+        # Try to read the real version from the recipe.
+        IFS=:; for _p in ${GOZPAK_PATH:-}; do unset IFS
+            [ -f "$_p/$pkg/version" ] && _ver_file="$_p/$pkg/version" && break
+        done; unset IFS
+
+        mkdir -p "$_bootstrap_db/$pkg"
+        if [ -n "$_ver_file" ]; then
+            cp "$_ver_file" "$_bootstrap_db/$pkg/version"
+        else
+            echo "0 1" > "$_bootstrap_db/$pkg/version"
+        fi
+    done
+
+    log "pre-seeded $# package stubs in installed DB"
+fi
+
+# ---
 
 mkdir -p "$out_dir"
 
