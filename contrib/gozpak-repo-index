@@ -1,0 +1,116 @@
+#!/bin/sh -e
+# Generate a repo.index from a directory of package tarballs.
+#
+# Usage: gozpak repo-index [dir]
+#
+# Scans the directory (default: ./repo or GOZPAK_REPO_OUT) for gozpak
+# tarballs (name@ver-rel.tar.*) and generates a repo.index file.
+#
+# The index format is tab-separated:
+#   name\tversion\trelease\tsha256\tsize\tdepends\tdescription
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '\033[1;33m->\033[m %s\n' "$*" >&2; }
+
+repo_dir=${1:-${GOZPAK_REPO_OUT:-./repo}}
+[ -d "$repo_dir" ] || die "directory not found: $repo_dir"
+
+index_file="$repo_dir/repo.index"
+tmp_index="$repo_dir/repo.index.tmp"
+
+# Detect sha256 utility (same logic as gozpak itself).
+cmd_sha=$(
+    command -v sha256sum ||
+    command -v openssl   ||
+    command -v sha256    ||
+    command -v shasum    ||
+    command -v digest
+) || die "no sha256 utility found"
+
+get_sha256() {
+    case ${cmd_sha##*/} in
+        sha256sum) "$cmd_sha" "$1" | cut -d' ' -f1 ;;
+        openssl)   "$cmd_sha" dgst -sha256 -r "$1" | cut -d' ' -f1 ;;
+        sha256)    "$cmd_sha" -r "$1" | cut -d' ' -f1 ;;
+        shasum)    "$cmd_sha" -a 256 "$1" | cut -d' ' -f1 ;;
+        digest)    "$cmd_sha" -a sha256 "$1" | cut -d' ' -f1 ;;
+    esac
+}
+
+log "scanning $repo_dir for package tarballs"
+
+_count=0
+: > "$tmp_index"
+
+# Use a temp dir for extracting package metadata.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+set +f
+for tar_file in "$repo_dir"/*.tar.*; do set -f
+    [ -f "$tar_file" ] || continue
+
+    _base=$(basename "$tar_file")
+
+    # Parse filename: name@version-release.tar.compress
+    _name=${_base%%@*}
+    _verrel=${_base#*@}
+    _verrel=${_verrel%.tar.*}
+    _ver=${_verrel%-*}
+    _rel=${_verrel##*-}
+
+    # Validate parsed fields.
+    [ -n "$_name" ] && [ -n "$_ver" ] && [ -n "$_rel" ] || {
+        log "WARNING: skipping $_base (can't parse name@ver-rel)"
+        continue
+    }
+
+    # Compute sha256 and size.
+    _sha=$(get_sha256 "$tar_file")
+    _size=$(wc -c < "$tar_file" | tr -d ' ')
+
+    # Extract depends and description from the tarball's package db.
+    _depends="-"
+    _desc=""
+    rm -rf "$tmp/pkg"
+    mkdir -p "$tmp/pkg"
+
+    # Extract only the package db files (small, fast).
+    _db_prefix="./var/db/gozpak/installed/$_name"
+    case $_base in
+        *.tar.gz|*.tgz)   gzip  -dc "$tar_file" | tar xf - -C "$tmp/pkg" "$_db_prefix" 2>/dev/null ;;
+        *.tar.bz2|*.tbz2) bzip2 -dc "$tar_file" | tar xf - -C "$tmp/pkg" "$_db_prefix" 2>/dev/null ;;
+        *.tar.xz|*.txz)   xz    -dc "$tar_file" | tar xf - -C "$tmp/pkg" "$_db_prefix" 2>/dev/null ;;
+        *.tar.zst)         zstd  -dc "$tar_file" | tar xf - -C "$tmp/pkg" "$_db_prefix" 2>/dev/null ;;
+        *)                 tar xf "$tar_file" -C "$tmp/pkg" "$_db_prefix" 2>/dev/null ;;
+    esac || true
+
+    _dep_file="$tmp/pkg/$_db_prefix/depends"
+    if [ -f "$_dep_file" ]; then
+        # Flatten depends to comma-separated.
+        _depends=$(grep -v '^#' "$_dep_file" | grep -v '^$' |
+                   cut -d' ' -f1 | tr '\n' ',' | sed 's/,$//')
+        [ -n "$_depends" ] || _depends="-"
+    fi
+
+    # Check for meta file with description.
+    _meta_file="$tmp/pkg/$_db_prefix/meta"
+    if [ -f "$_meta_file" ]; then
+        _desc=$(sed -n 's/^description=//p' "$_meta_file" | head -1)
+    fi
+
+    # Write index entry (tab-separated).
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$_name" "$_ver" "$_rel" "$_sha" "$_size" "$_depends" "$_desc" \
+        >> "$tmp_index"
+
+    _count=$((_count + 1))
+    log "  indexed: $_name $_ver-$_rel ($_size bytes)"
+done
+set -f
+
+# Sort by package name and write final index.
+sort -t'	' -k1,1 "$tmp_index" > "$index_file"
+rm -f "$tmp_index"
+
+log "wrote $index_file ($_count packages)"
