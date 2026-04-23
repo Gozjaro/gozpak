@@ -816,6 +816,60 @@ pkg_manifest_replace() {
     mv -f "$_tmp_file" "$sys_db/$1/manifest"
 }
 
+pkg_read_meta() {
+    # Read a key from the optional 'meta' file in the package's database entry.
+    # Usage: pkg_read_meta <pkg> <key>
+    # Sets _meta_val to the value or empty string.
+    _meta_val=
+    [ -f "$sys_db/$1/meta" ] || return 0
+
+    while IFS='=' read -r _mk _mv; do
+        case $_mk in "$2") _meta_val=$_mv; return 0 ;; esac
+    done < "$sys_db/$1/meta"
+}
+
+pkg_run_meta_triggers() {
+    # Run post-install triggers based on the package's meta file.
+    # Called after a successful install.
+    [ -f "$sys_db/$1/meta" ] || return 0
+
+    pkg_read_meta "$1" type
+
+    case $_meta_val in
+        kernel-module)
+            log "$1" "Running depmod (kernel module)"
+            depmod -a 2>/dev/null || war "$1" "depmod failed"
+        ;;
+        font)
+            log "$1" "Updating font cache"
+            fc-cache -f 2>/dev/null || war "$1" "fc-cache failed"
+        ;;
+        icon-theme)
+            log "$1" "Updating icon cache"
+            gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || :
+        ;;
+        desktop)
+            log "$1" "Updating desktop database"
+            update-desktop-database /usr/share/applications 2>/dev/null || :
+        ;;
+        mime)
+            log "$1" "Updating MIME database"
+            update-mime-database /usr/share/mime 2>/dev/null || :
+        ;;
+        library)
+            log "$1" "Running ldconfig"
+            ldconfig 2>/dev/null || :
+        ;;
+    esac
+
+    # Run custom post-install command from meta if present.
+    pkg_read_meta "$1" post-install-cmd
+    if ok "$_meta_val"; then
+        log "$1" "Running post-install-cmd: $_meta_val"
+        eval "$_meta_val" || war "$1" "post-install-cmd failed"
+    fi
+}
+
 pkg_etcsums() {
     # Generate checksums for each configuration file in the package's /etc/
     # directory for use in "smart" handling of these files.
@@ -1557,6 +1611,7 @@ pkg_install() {
         # arg3: path to installed package database
         run_hook_pkg post-install "$_pkg"
         run_hook     post-install "$_pkg" "$sys_db/$_pkg"
+        pkg_run_meta_triggers "$_pkg"
 
         log "$_pkg" "Installed successfully"
 
