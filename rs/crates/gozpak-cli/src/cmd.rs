@@ -268,14 +268,33 @@ fn merged_index() -> (Vec<gozpak_repo::RepoBase>, Vec<gozpak_repo::BinaryEntry>)
 
 /// `L`/`list-remote` — the packages in the cached (verified) indices.
 /// With arguments, only those names are shown; unknown ones die.
+/// The same package may be served by more than one synced channel
+/// (LAN mirror + GitHub fallback of the same `stable` repo): dedupe
+/// identical (name, version, release) entries so each shows once,
+/// while genuinely different versions across channels still both
+/// appear. Output is deterministic: sorted by name, then version.
 pub fn list_remote(_ctx: &Ctx, names: &[String]) -> i32 {
     let (_, entries) = merged_index();
     if entries.is_empty() {
         die("list-remote", "no synced repositories (run 'gozpak sync' first)");
     }
+    let mut shown: Vec<(String, u64, String, String, String)> = Vec::new();
     for e in entries.iter().filter(|e| names.is_empty() || names.contains(&e.name)) {
-        let vr = gozpak_core::VersionRel::new(e.version.clone(), e.release.to_string());
-        println!("{} {}", e.name, vr.display());
+        let rel = e.release.to_string();
+        let vr = gozpak_core::VersionRel::new(e.version.clone(), rel.clone());
+        shown.push((e.name.clone(), e.epoch, e.version.clone(), rel, vr.display()));
+    }
+    shown.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| {
+            gozpak_core::pkgver_cmp(
+                &format!("{}:{}-{}", a.1, a.2, a.3),
+                &format!("{}:{}-{}", b.1, b.2, b.3),
+            )
+        })
+    });
+    shown.dedup();
+    for (_, _, _, _, disp) in &shown {
+        println!("{}", disp);
     }
     if !names.is_empty() {
         let known: Vec<&String> = entries.iter().map(|e| &e.name).collect();
