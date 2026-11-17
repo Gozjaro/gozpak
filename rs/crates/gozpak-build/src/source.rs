@@ -173,14 +173,26 @@ pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, Buil
                 )?;
                 // A pinned commit/tag is only in a depth-1 clone when it
                 // is the remote's default HEAD; fetch it explicitly if not.
+                // A tag fetched without a refspec lands only in FETCH_HEAD,
+                // so map it into the local refs/tags namespace explicitly.
                 if proc::run(pkg, &git_dir, "git", &["checkout", pin], &[]).is_err() {
-                    proc::run(
-                        pkg,
-                        &git_dir,
-                        "git",
-                        &["fetch", "--depth", "1", "origin", pin],
-                        &[],
-                    )?;
+                    let tag_fetch: &[&str] = &[
+                        "fetch",
+                        "--depth",
+                        "1",
+                        "origin",
+                        &format!("refs/tags/{pin}:refs/tags/{pin}"),
+                    ];
+                    if proc::run(pkg, &git_dir, "git", tag_fetch, &[]).is_err() {
+                        // Not a tag name (branch / commit): fetch it directly.
+                        proc::run(
+                            pkg,
+                            &git_dir,
+                            "git",
+                            &["fetch", "--depth", "1", "origin", pin],
+                            &[],
+                        )?;
+                    }
                     proc::run(pkg, &git_dir, "git", &["checkout", pin], &[])?;
                 }
                 git_dirs.push(git_dir);

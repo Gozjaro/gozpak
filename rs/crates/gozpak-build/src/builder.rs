@@ -224,7 +224,11 @@ pub fn jobs() -> String {
 /// `$VERSION` ...), and JOBS.
 pub fn build_env(recipe: &Recipe, work: &Work) -> Vec<(&'static str, String)> {
     let subst = Subst::from_recipe(&recipe.name, &recipe.version, recipe.epoch);
+    // Deterministic build PATH: LFS build tools land in /usr/local/bin
+    // (book convention), system binaries in /usr/bin:/bin. Build steps
+    // must not depend on the invoking shell's PATH.
     vec![
+        ("PATH", "/usr/local/bin:/usr/bin:/bin".into()),
         ("DESTDIR", work.dest.to_string_lossy().into_owned()),
         ("VERSION", subst.version.clone()),
         ("RELEASE", subst.release.clone()),
