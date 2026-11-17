@@ -216,6 +216,54 @@ pub fn install_staged(root: &Path, staged: &Staged) -> Result<Vec<PathBuf>, Inst
     Ok(pkgnew)
 }
 
+/// Install one file atomically: write a sibling temp file in the same
+/// directory, set the source's permission bits on it, then
+/// `rename()` over the destination. Rename replaces a regular file or
+/// symlink atomically on POSIX; it is also safe when the destination
+/// is the very executable that is running (self-upgrade): the running
+/// process keeps its old inode and the next invocation of the package
+/// name picks up the new file. A plain `fs::copy` would `O_TRUNC` the
+/// running binary and fail with `ETXTBSY`.
+#[cfg(unix)]
+fn atomic_install_file(src: &Path, dst: &Path) -> Result<(), InstallError> {
+    let tmp = dst.with_extension(format!("gozpak-new-{}", std::process::id()));
+    std::fs::copy(src, &tmp)?;
+    let perms = std::fs::metadata(src)?.permissions();
+    std::fs::set_permissions(&tmp, perms)?;
+    std::fs::rename(&tmp, dst)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn atomic_install_file(src: &Path, dst: &Path) -> Result<(), InstallError> {
+    std::fs::copy(src, dst)?;
+    Ok(())
+}
+
+/// Install one symlink atomically: create a sibling temp symlink and
+/// `rename()` it over the destination (renaming over a symlink
+/// replaces it atomically; a remove+create pair would have a race
+/// window and can also hit the busy case oddly).
+#[cfg(unix)]
+fn atomic_install_symlink(target: &std::path::Path, dst: &Path) -> Result<(), InstallError> {
+    let tmp = dst.with_extension(format!("gozpak-new-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(target, &tmp)?;
+    std::fs::rename(&tmp, dst)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn atomic_install_symlink(target: &std::path::Path, dst: &Path) -> Result<(), InstallError> {
+    let _ = std::fs::remove_file(dst);
+    if target.is_dir() {
+        copy_tree_into(target, dst)?;
+    } else {
+        std::fs::copy(target, dst)?;
+    }
+    Ok(())
+}
+
 fn copy_tree_into(src: &Path, dst: &Path) -> Result<(), InstallError> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -225,29 +273,14 @@ fn copy_tree_into(src: &Path, dst: &Path) -> Result<(), InstallError> {
         let ft = entry.file_type()?;
         if ft.is_symlink() {
             let target = std::fs::read_link(&p)?;
-            let _ = std::fs::remove_file(&q);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &q)?;
-            #[cfg(not(unix))]
-            {
-                if target.is_dir() {
-                    copy_tree_into(&target, &q)?;
-                } else {
-                    std::fs::copy(&p, &q)?;
-                }
-            }
+            atomic_install_symlink(&target, &q)?;
         } else if ft.is_dir() {
             copy_tree_into(&p, &q)?;
         } else {
-            // Preserve the packaged permission bits (a tar extract has
-            // already restored them; copy keeps them on most platforms
-            // — set them explicitly from the source metadata).
-            std::fs::copy(&p, &q)?;
-            #[cfg(unix)]
-            {
-                let perms = std::fs::metadata(&p)?.permissions();
-                std::fs::set_permissions(&q, perms)?;
-            }
+            // Atomic sibling-temp + rename; preserves the packaged
+            // permission bits and is safe for self-upgrade (the running
+            // binary of this very `gozpak` process).
+            atomic_install_file(&p, &q)?;
         }
     }
     Ok(())
