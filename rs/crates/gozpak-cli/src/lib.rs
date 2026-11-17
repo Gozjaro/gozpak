@@ -1,16 +1,18 @@
-//! `gozpak-cli` (M1): the `gozpak` binary and its command layer.
+//! `gozpak-cli` (M1/M2): the `gozpak` binary and its command layer.
 //!
-//! M1 is read-only parity with the shell version:
-//!
-//! | command        | M1/M2a status                               |
-//! |----------------|---------------------------------------------|
-//! | `version` (v)  | implemented                                 |
-//! | `list` (l)     | implemented (installed DB)                  |
-//! | `search` (s)   | implemented (recipes under `GOZPAK_PATH`)   |
-//! | `checksum` (c) | implemented (local + cached sources only)   |
-//! | `build` / `repo-build` | M2a: stage + build + pack `.gpkg` |
-//! | install/get/remove/download/fetch/sync/list-remote/update/upgrade/alternatives | stubbed — "not implemented in M1" |
-//! | unknown word   | extension fallback stub (`gozpak-<word>`)   |
+//! | command        | status                                             |
+//! |----------------|----------------------------------------------------|
+//! | `version` (v)  | M1                                                 |
+//! | `list` (l)     | M1 (installed DB)                                  |
+//! | `search` (s)   | M1 (recipes under `GOZPAK_PATH`)                   |
+//! | `checksum` (c) | M1 (local + cached sources only)                   |
+//! | `build` / `repo-build` | M2a: stage + build + pack `.gpkg`       |
+//! | `sync` (S)     | M2b: fetch + ed25519-verify + cache repo indices   |
+//! | `list-remote` (L) | M2b: packages in the cached (verified) index |
+//! | `fetch` (f) / `get` (g) / `install` (i) | M2b: verified download + install transaction (deps, tree-hash verify, `.pkgnew`, hooks, DB) |
+//! | `index-build` / `sign` / `keygen` | M2b: packaging-host tools |
+//! | remove/download/update/upgrade/alternatives | stubbed (M3+) |
+//! | unknown word   | extension fallback stub (`gozpak-<word>`)         |
 //!
 //! Environment honored: `GOZPAK_ROOT`, `GOZPAK_PATH`, `GOZPAK_REPOS`
 //! (repo URL config is parsed by `gozpak-repo`; M1 commands don't use
@@ -92,6 +94,14 @@ fn dispatch(ctx: &Ctx, parsed: &args::Parsed) -> i32 {
         Some(args::Action::RepoBuild) => {
             cmd::build(ctx, &parsed.names, true, !parsed.build_only)
         }
+        Some(args::Action::Sync) => cmd::sync(ctx, &parsed.names),
+        Some(args::Action::ListRemote) => cmd::list_remote(ctx, &parsed.names),
+        Some(args::Action::Fetch) => cmd::fetch(ctx, &parsed.names),
+        Some(args::Action::Get) => cmd::install(ctx, &parsed.names),
+        Some(args::Action::Install) => cmd::install(ctx, &parsed.names),
+        Some(args::Action::IndexBuild) => cmd::index_build(ctx, &parsed.names),
+        Some(args::Action::Sign) => cmd::sign(ctx, &parsed.names),
+        Some(args::Action::KeyGen) => cmd::keygen(ctx, &parsed.names),
         Some(args::Action::Stub { name }) => cmd::stub(name, &parsed.names),
         None => {
             if parsed.action_raw.is_empty() {

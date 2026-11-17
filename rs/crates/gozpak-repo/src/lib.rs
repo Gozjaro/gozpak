@@ -14,15 +14,26 @@
 //!   `/etc/gozpak/repos.conf`), plus the filesystem-safe URL id used for
 //!   the index cache layout.
 //!
-//! M1 has no network: nothing here downloads. Fetching/syncing arrives in
-//! M2 along with `gozpak sync`/`get`/`fetch`/`list-remote`.
+//! M1 has no network: nothing here downloads. The fetch side
+//! ([`remote`], M2b) downloads via the system `curl`; ed25519
+//! index signing/verification lives in [`signing`].
 
 pub mod binary;
 pub mod gpkg;
 pub mod index;
+pub mod remote;
+pub mod signing;
 pub mod urls;
 
 pub use binary::{BinaryEntry, BinaryIndexError, parse_index_json};
 pub use gpkg::gpkg_filename;
 pub use index::{split_dep_list, IndexEntry, RepoIndex, RepoIndexError};
+pub use remote::{
+    cached_repos, fetch_from, fetch_pkg, pkg_location, resolve_base, sync_repo, RepoBase,
+    RemoteError,
+};
+pub use signing::{
+    EMBEDDED_PUBKEY, hex_key, hex_sig, keygen, read_key_file, sign, to_hex, verify,
+    write_key_file, SigningError,
+};
 pub use urls::{configured_repos, parse_conf, parse_env_repos, load_conf, url_id};

@@ -19,12 +19,32 @@ pub enum Action {
     /// (`[manifest].repo` / `built_by`); the `-b` flag (recorded in
     /// [`Parsed::build_only`]) skips the pack step.
     RepoBuild,
-    /// A command the shell version has but M1 only stubs out.
+    /// `sync` — M2b: fetch + verify (ed25519) + cache repo indices.
+    Sync,
+    /// `list-remote` — M2b: packages in the cached (verified) indices.
+    ListRemote,
+    /// `fetch` — M2b: download a `.gpkg` from the verified index, no
+    /// install.
+    Fetch,
+    /// `get` — M2b: fetch + install.
+    Get,
+    /// `install` — M2b: install `.gpkg`s (from the bin cache or the
+    /// verified index) into the target root.
+    Install,
+    /// `index-build` — M2b (packaging host): `index.json` from a
+    /// directory of `.gpkg` files.
+    IndexBuild,
+    /// `sign` — M2b (packaging host): sign `index.json` →
+    /// `index.json.sig` (ed25519, key from `GOZPAK_SIGN_KEY`).
+    Sign,
+    /// `keygen` — M2b: generate an ed25519 repo keypair (print the
+    /// public key; the seed file goes on the packaging host only).
+    KeyGen,
+    /// A command the shell version has but M2 only stubs out.
     ///
-    /// install, get, remove, download, fetch, sync, list-remote,
-    /// update, upgrade, alternatives.
+    /// remove, download, update, upgrade, alternatives.
     Stub {
-        /// Canonical (full) command name, e.g. "install".
+        /// Canonical (full) command name, e.g. "remove".
         name: &'static str,
     },
 }
@@ -124,13 +144,16 @@ fn resolve_action(raw: &str) -> Option<Action> {
         "checksum" => Action::Checksum,
         "build" => Action::Build,
         "repo-build" => Action::RepoBuild,
-        "install" => Action::Stub { name: "install" },
-        "get" => Action::Stub { name: "get" },
+        "sync" => Action::Sync,
+        "list-remote" => Action::ListRemote,
+        "fetch" => Action::Fetch,
+        "get" => Action::Get,
+        "install" => Action::Install,
+        "index-build" => Action::IndexBuild,
+        "sign" => Action::Sign,
+        "keygen" => Action::KeyGen,
         "remove" => Action::Stub { name: "remove" },
         "download" => Action::Stub { name: "download" },
-        "fetch" => Action::Stub { name: "fetch" },
-        "sync" => Action::Stub { name: "sync" },
-        "list-remote" => Action::Stub { name: "list-remote" },
         "update" => Action::Stub { name: "update" },
         "upgrade" => Action::Stub { name: "upgrade" },
         "alternatives" => Action::Stub { name: "alternatives" },
@@ -180,10 +203,10 @@ mod tests {
 
     #[test]
     fn stub_commands_resolve_to_stub() {
-        assert!(is_stub(&parse(&[v("i")]).action));
+        assert!(is_stub(&parse(&[v("r")]).action));
         assert!(is_stub(&parse(&[v("U")]).action));
         assert!(is_stub(&parse(&[v("alternatives")]).action));
-        assert!(is_stub(&parse(&[v("list-remote")]).action));
+        assert!(is_stub(&parse(&[v("d")]).action));
     }
 
     #[test]
@@ -205,9 +228,9 @@ mod tests {
 
     #[test]
     fn case_sensitive_aliases() {
-        // Lowercase s = search; uppercase S = sync (stub).
+        // Lowercase s = search; uppercase S = sync (M2b).
         assert_eq!(parse(&[v("s")]).action, Some(Action::Search));
-        assert!(is_stub(&parse(&[v("S")]).action));
+        assert_eq!(parse(&[v("S")]).action, Some(Action::Sync));
     }
 
     #[test]

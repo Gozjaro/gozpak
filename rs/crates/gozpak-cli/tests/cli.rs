@@ -248,9 +248,10 @@ fn checksum_remote_only_source_without_cache_is_noop() {
 
 #[test]
 fn stub_commands_report_not_implemented() {
-    // `b`/`build` left this list in M2a (it is implemented now); the
-    // remaining stubs still report "not implemented in M1".
-    for action in ["i", "g", "r", "d", "f", "S", "L", "u", "U", "a"] {
+    // `b`/`build` left this list in M2a (it is implemented now); the M2b
+    // repo/install commands left it next (covered by
+    // `m2b_commands_without_repo_die_cleanly`). Only these remain stubs.
+    for action in ["r", "d", "u", "U", "a"] {
         let o = gozpak(&[], &[action, "somepkg"]);
         assert_eq!(o.status.code(), Some(1), "action {action}");
         let err = out_str(&o.stderr);
@@ -259,6 +260,30 @@ fn stub_commands_report_not_implemented() {
             "action {action}: stderr: {err}"
         );
     }
+}
+
+#[test]
+fn m2b_commands_without_repo_die_cleanly() {
+    // The M2b binary-repo commands must die with a clean, specific error
+    // when no repository is configured / synced (hermetic env, no
+    // GOZPAK_REPOS, no cached indices) — not panic, not "not implemented".
+    for action in ["i", "g", "f", "L"] {
+        let o = gozpak(&[], &[action, "somepkg"]);
+        assert_eq!(o.status.code(), Some(1), "action {action}");
+        let err = out_str(&o.stderr);
+        assert!(
+            err.contains("no synced repositories"),
+            "action {action}: stderr: {err}"
+        );
+    }
+    // `sync` with no configured repos reports the configuration gap.
+    let o = gozpak(&[], &["S"]);
+    assert_eq!(o.status.code(), Some(1));
+    let err = out_str(&o.stderr);
+    assert!(
+        err.contains("no repositories configured"),
+        "S: stderr: {err}"
+    );
 }
 
 #[test]
@@ -388,6 +413,6 @@ fn no_args_prints_usage() {
     let err = out_str(&o.stderr);
     assert!(err.contains("alternatives"), "stderr: {err}");
     assert!(err.contains("-y, --yes"), "stderr: {err}");
-    assert!(err.contains("M1 note"), "stderr: {err}");
+    assert!(err.contains("M2b note"), "stderr: {err}");
     assert_eq!(out_str(&o.stdout), "");
 }

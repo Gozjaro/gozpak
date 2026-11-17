@@ -25,10 +25,13 @@
 //! scope for M2a.
 
 pub mod builder;
+pub mod index;
 pub mod manifest;
 pub mod pack;
 mod proc;
 pub mod source;
+
+pub use index::{build_index, sign_index, write_index, IndexError};
 
 use std::path::PathBuf;
 

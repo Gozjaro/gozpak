@@ -1,0 +1,19 @@
+[package]
+name = "gozpak-install"
+description = "gozpak (Rust rewrite, M2b): the install side — unpack .gpkg (tar.zst), verify tree hash + manifest, install to root with .pkgnew backup, post hooks, installed DB, dependency checks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gozpak-core = { path = "../gozpak-core" }
+gozpak-repo = { path = "../gozpak-repo" }
+gozpak-build = { path = "../gozpak-build" }
+# Hook `match` filters use the recipe crate's glob matcher.
+gozpak-recipe = { path = "../gozpak-recipe" }
+# Same pinned zstd as gozpak-build: decodes the .gpkg container (tar.zst).
+zstd = { version = "=0.13.5", default-features = false }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

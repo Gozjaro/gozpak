@@ -1,11 +1,15 @@
 //! M1 command implementations: version, list, search, checksum, usage,
 //! and the not-implemented stubs. M2a adds `build`/`repo-build`
-//! (stage + build + pack via `gozpak-build`).
+//! (stage + build + pack via `gozpak-build`). M2b adds the binary-repo
+//! side: `sync`/`list-remote`/`fetch`/`get`/`install` (verified
+//! index + `.gpkg` install) and the packaging-host tools
+//! `index-build`/`sign`/`keygen`.
 
 use std::path::PathBuf;
 
 use gozpak_core::{paths, sha256};
 use gozpak_recipe::{subst, Recipe, RecipeKind, Source};
+use gozpak_repo::RemoteError;
 
 use crate::log::{die, log_line, war};
 use crate::Ctx;
@@ -19,13 +23,16 @@ pub fn usage() {
     log_line("download     Download sources", "");
     log_line("fetch        Download binary packages (no install)", "");
     log_line("get          Fetch and install binary packages", "");
+    log_line("index-build  Build index.json from a directory of .gpkg files", "");
     log_line("install      Install packages", "");
+    log_line("keygen       Generate an ed25519 repository keypair", "");
     log_line("list         List installed packages", "");
     log_line("list-remote  List packages in remote repositories", "");
     log_line("remove       Remove packages", "");
     log_line("repo-build [-b] pkg...   Build and pack .gpkg packages (repo metadata)", "");
     log_line("search       Search for packages", "");
-    log_line("sync         Sync remote repository indices", "");
+    log_line("sign         Sign index.json (index.json.sig, ed25519)", "");
+    log_line("sync         Sync remote repository indices (signature-verified)", "");
     log_line("update       Update the system and repositories", "");
     log_line("upgrade      Update the system", "");
     log_line("version      Package manager version", "");
@@ -35,9 +42,8 @@ pub fn usage() {
     log_line("  -b         (repo-build only) build only, skip the pack step", "");
     log_line("", "");
     log_line(
-        "M1 note: version, list, search and checksum are the read \
-         commands; build and repo-build are functional in M2a (stage, \
-         build, pack .gpkg tar.zst); all other commands are still stubs.",
+        "M2b note: sync/list-remote/fetch/get/install/index-build/sign/\
+         keygen are implemented; remove/download/update/upgrade/alternatives are stubs.",
         "",
     );
 }
@@ -200,6 +206,306 @@ fn proc_root() -> PathBuf {
         .parent()
         .map(|p| p.join("proc"))
         .unwrap_or_else(|| PathBuf::from("/tmp/gozpak/proc"))
+}
+
+// ---------------------------------------------------------------------------
+// M2b: the binary-repo side.
+// ---------------------------------------------------------------------------
+
+/// The embedded repo public key, decoded (the M2b trust root; a
+/// per-repo key override is a follow-up, not part of the spec).
+fn repo_pubkey() -> Result<Vec<u8>, RemoteError> {
+    gozpak_repo::signing::hex_key(gozpak_repo::EMBEDDED_PUBKEY, "embedded public key")
+        .map_err(|_| RemoteError::IndexParse("corrupt embedded public key".into()))
+}
+
+/// `S`/`sync` — fetch + ed25519-verify + cache the index of every
+/// configured repo (or the explicit URLs given as arguments).
+pub fn sync(ctx: &Ctx, urls: &[String]) -> i32 {
+    let urls = if urls.is_empty() {
+        gozpak_repo::urls::configured_repos(&ctx.root)
+    } else {
+        urls.to_vec()
+    };
+    if urls.is_empty() {
+        die("sync", "no repositories configured (GOZPAK_REPOS or $GOZPAK_ROOT/etc/gozpak/repos.conf)");
+    }
+    let pubkey = match repo_pubkey() {
+        Ok(k) => k,
+        Err(e) => die("sync", &e.to_string()),
+    };
+    let cache = paths::repo_cache_dir();
+    let mut ok = 0usize;
+    for url in &urls {
+        match gozpak_repo::sync_repo(url, &cache, &pubkey) {
+            Ok(entries) => {
+                ok += 1;
+                log_line(url, &format!("{} packages (index verified)", entries.len()));
+            }
+            Err(e) => {
+                // One bad repo must not poison the others.
+                war(url, &e.to_string());
+            }
+        }
+    }
+    if ok == 0 {
+        return 1;
+    }
+    0
+}
+
+/// All synced repos: their resolved bases plus the cached,
+/// signature-verified index entries.
+fn merged_index() -> (Vec<gozpak_repo::RepoBase>, Vec<gozpak_repo::BinaryEntry>) {
+    let mut bases = Vec::new();
+    let mut entries = Vec::new();
+    for (base, e) in gozpak_repo::cached_repos(&paths::repo_cache_dir()) {
+        bases.push(base);
+        entries.extend(e);
+    }
+    (bases, entries)
+}
+
+/// `L`/`list-remote` — the packages in the cached (verified) indices.
+/// With arguments, only those names are shown; unknown ones die.
+pub fn list_remote(_ctx: &Ctx, names: &[String]) -> i32 {
+    let (_, entries) = merged_index();
+    if entries.is_empty() {
+        die("list-remote", "no synced repositories (run 'gozpak sync' first)");
+    }
+    for e in entries.iter().filter(|e| names.is_empty() || names.contains(&e.name)) {
+        let vr = gozpak_core::VersionRel::new(e.version.clone(), e.release.to_string());
+        println!("{} {}", e.name, vr.display());
+    }
+    if !names.is_empty() {
+        let known: Vec<&String> = entries.iter().map(|e| &e.name).collect();
+        for n in names {
+            if !known.iter().any(|k| *k == n) {
+                die(n, "not found in any synced repository");
+            }
+        }
+    }
+    0
+}
+
+/// Pick, per requested name, the highest (epoch, version, release)
+/// entry across all cached repos.
+fn resolve_wanted(
+    names: &[String],
+    entries: &[gozpak_repo::BinaryEntry],
+) -> Vec<gozpak_repo::BinaryEntry> {
+    use gozpak_repo::BinaryEntry;
+    let mut out = Vec::new();
+    for n in names {
+        let candidates: Vec<&BinaryEntry> = entries.iter().filter(|e| &e.name == n).collect();
+        if candidates.is_empty() {
+            die(n, "not found in any synced repository");
+        }
+        let best = candidates.iter().max_by(|a, b| {
+            gozpak_core::pkgver_cmp(
+                &format!("{}:{}-{}", a.epoch, a.version, a.release),
+                &format!("{}:{}-{}", b.epoch, b.version, b.release),
+            )
+        });
+        out.push(best.cloned().expect("candidates non-empty").clone());
+    }
+    out
+}
+
+/// Locate one entry's `.gpkg`: full-URL entries download through the
+/// asset channel; bare-filename entries are read from the synced local
+/// (relay) repo. Either way the result lands in the bin cache with its
+/// sha256 checked against the verified index.
+fn ensure_pkg(_ctx: &Ctx, entry: &gozpak_repo::BinaryEntry) -> PathBuf {
+    let (bases, _) = merged_index();
+    // A bare-filename entry needs the local repo it was indexed from;
+    // a full-URL entry ignores the base (its own URL is the source).
+    let local_base = bases
+        .iter()
+        .find(|b| matches!(b, gozpak_repo::RepoBase::Local(_)));
+    let base = if entry.url.contains("://") {
+        gozpak_repo::RepoBase::Download {
+            url: entry.url.clone(),
+            tag: String::new(),
+        }
+    } else {
+        match local_base {
+            Some(b) => b.clone(),
+            None => die(&entry.name, "bare-filename index entry but no local repo was synced"),
+        }
+    };
+    match gozpak_repo::pkg_location(entry, &base, &paths::bin_cache_dir()) {
+        Ok(p) => p,
+        Err(e) => die(&entry.name, &e.to_string()),
+    }
+}
+
+/// `f`/`fetch` — download the wanted packages into the bin cache
+/// (sha256-verified against the index). No install.
+pub fn fetch(ctx: &Ctx, names: &[String]) -> i32 {
+    let (_, entries) = merged_index();
+    if entries.is_empty() {
+        die("fetch", "no synced repositories (run 'gozpak sync' first)");
+    }
+    for e in resolve_wanted(names, &entries) {
+        let p = ensure_pkg(ctx, &e);
+        let sum = sha256::hash_file(&p).unwrap_or_default();
+        println!("{sum}  {}", p.display());
+    }
+    0
+}
+
+/// `i`/`install` and `g`/`get` — one install transaction:
+///
+/// 1. resolve + locate every wanted package (download on demand),
+/// 2. dependency check against the installed DB + the transaction,
+/// 3. unpack + verify (tree hash) each package,
+/// 4. install into `ctx.root` (config `.pkgnew` backup),
+/// 5. run the transaction's deduplicated post-hooks,
+/// 6. record the packages in the installed DB.
+///
+/// `get` is `install` with the download step guaranteed first — the
+/// same code path (`ensure_pkg` reuses cached files).
+pub fn install(ctx: &Ctx, names: &[String]) -> i32 {
+    use gozpak_install::{
+        check_deps, installed_list, record_install, run_hooks, transaction_hooks, unpack_gpkg,
+        verify_staged,
+    };
+
+    let (_, entries) = merged_index();
+    if entries.is_empty() {
+        die("install", "no synced repositories (run 'gozpak sync' first)");
+    }
+    let wanted = resolve_wanted(names, &entries);
+
+    // Dependency gate BEFORE touching the system.
+    let db = &ctx.db;
+    let installed = installed_list(db);
+    if let Err(e) = check_deps(&wanted, &installed) {
+        die(&wanted[0].name, &e.to_string());
+    }
+
+    let tmp = proc_root();
+    let _ = std::fs::create_dir_all(&tmp);
+    let staging = tmp.join(format!("install-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&staging);
+
+    // 1+3: locate, unpack, verify.
+    let mut staged = Vec::new();
+    for e in &wanted {
+        let pkg = ensure_pkg(ctx, e);
+        let s =
+            unpack_gpkg(&pkg, &staging).unwrap_or_else(|err| die(&e.name, &err.to_string()));
+        verify_staged(&s).unwrap_or_else(|err| die(&e.name, &err.to_string()));
+        log_line(
+            &e.name,
+            &format!("verified {} ({} KB)", pkg.file_name().unwrap().to_string_lossy(), e.size.div_euclid(1024)),
+        );
+        staged.push(s);
+    }
+
+    // 4: install the trees.
+    let mut pkgnew_all = Vec::new();
+    for s in &staged {
+        match gozpak_install::install_staged(&ctx.root, s) {
+            Ok(pn) => pkgnew_all.extend(pn),
+            Err(e) => die(s.name(), &format!("install failed: {e}")),
+        }
+    }
+    for p in &pkgnew_all {
+        war("config", &format!("saved {} (the package copy is now live)", p.display()));
+    }
+
+    // 5: the transaction's hooks (deduplicated across packages).
+    let hook_pkgs: Vec<(gozpak_build::Manifest, &Vec<String>)> = staged
+        .iter()
+        .map(|s| (s.manifest.clone(), &s.manifest.manifest.files))
+        .collect();
+    let hooks = transaction_hooks(&hook_pkgs);
+    for outcome in run_hooks(&ctx.root, &hooks) {
+        match outcome {
+            gozpak_install::HookOutcome::Ran { command } => log_line("hook", &format!("ran {command}")),
+            gozpak_install::HookOutcome::Skipped { name, reason } => {
+                war("hook", &format!("{name} skipped ({reason})"))
+            }
+            gozpak_install::HookOutcome::Failed { command, status } => {
+                war("hook", &format!("{command} failed ({status})"))
+            }
+        }
+    }
+
+    // 6: the installed DB.
+    for s in &staged {
+        let p = &s.manifest.package;
+        record_install(db, &p.name, &p.version, &p.release, &s.manifest.manifest.files)
+            .unwrap_or_else(|e| die(&p.name, &format!("db record: {e}")));
+        log_line(&p.name, &format!("installed {}-{}", p.version, p.release));
+    }
+    0
+}
+
+/// `index-build <dir> [base-url]` — packaging host: the `index.json`
+/// for a directory of finished `.gpkg` packages.
+pub fn index_build(_ctx: &Ctx, names: &[String]) -> i32 {
+    let Some(dir) = names.first() else {
+        die("index-build", "usage: gozpak index-build <dir> [base-url]");
+    };
+    let base_url = names.get(1).map(String::as_str).unwrap_or("");
+    let entries = match gozpak_build::build_index(std::path::Path::new(dir), base_url) {
+        Ok(e) => e,
+        Err(e) => die(dir, &e.to_string()),
+    };
+    match gozpak_build::write_index(std::path::Path::new(dir), &entries) {
+        Ok(p) => {
+            println!("{}  {} packages", entries.len(), p.display());
+        }
+        Err(e) => die(dir, &e.to_string()),
+    }
+    0
+}
+
+/// `sign <dir>` — packaging host: `index.json` → `index.json.sig`
+/// (ed25519; the seed comes from the `GOZPAK_SIGN_KEY` env var, the
+/// path of the 32-byte seed file on the packaging host).
+pub fn sign(_ctx: &Ctx, names: &[String]) -> i32 {
+    let Some(dir) = names.first() else {
+        die("sign", "usage: gozpak sign <dir> (GOZPAK_SIGN_KEY=<seed file>)");
+    };
+    let key_path = match std::env::var("GOZPAK_SIGN_KEY") {
+        Ok(p) => p,
+        Err(_) => die("sign", "GOZPAK_SIGN_KEY (path to the 32-byte seed) is not set"),
+    };
+    let seed = match gozpak_repo::signing::read_key_file(
+        std::path::Path::new(&key_path),
+        "signing key",
+    ) {
+        Ok(k) => k,
+        Err(e) => die("sign", &e.to_string()),
+    };
+    match gozpak_build::sign_index(std::path::Path::new(dir), &seed) {
+        Ok(p) => println!(
+            "signed {} -> {}",
+            std::path::Path::new(dir).join("index.json").display(),
+            p.display()
+        ),
+        Err(e) => die(dir, &e.to_string()),
+    }
+    0
+}
+
+/// `keygen [out]` — generate the repository keypair. The seed file is
+/// written to `out` (default `./gozjaro-repo.key`); the public key is
+/// printed for embedding in `gozpak_repo::EMBEDDED_PUBKEY`.
+pub fn keygen(_ctx: &Ctx, names: &[String]) -> i32 {
+    let out = names.first().map(String::as_str).unwrap_or("./gozjaro-repo.key");
+    let (seed, pubkey) = gozpak_repo::signing::keygen();
+    if let Err(e) = gozpak_repo::signing::write_key_file(std::path::Path::new(out), &seed) {
+        die("keygen", &e.to_string());
+    }
+    let pub_hex = gozpak_repo::signing::to_hex(&pubkey);
+    println!("public key: {pub_hex}");
+    println!("seed file:  {out} (0600 — keep it on the packaging host only)");
+    0
 }
 
 /// `pkg_order`-free stub for M2/M3 commands. Mirrors the shell log style

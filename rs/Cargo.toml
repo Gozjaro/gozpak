@@ -5,6 +5,7 @@ members = [
     "crates/gozpak-recipe",
     "crates/gozpak-repo",
     "crates/gozpak-build",
+    "crates/gozpak-install",
     "crates/gozpak-cli",
 ]
 

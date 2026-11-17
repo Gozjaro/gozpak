@@ -20,6 +20,8 @@ gozpak-core = { path = "../gozpak-core" }
 gozpak-recipe = { path = "../gozpak-recipe" }
 gozpak-repo = { path = "../gozpak-repo" }
 gozpak-build = { path = "../gozpak-build" }
+# M2b: the install side (unpack + verify + install + hooks + DB).
+gozpak-install = { path = "../gozpak-install" }
 
 [dev-dependencies]
 gozpak-core = { path = "../gozpak-core" }
