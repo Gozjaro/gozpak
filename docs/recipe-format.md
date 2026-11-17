@@ -45,8 +45,11 @@ patches = ["patches/fix-build.patch"]   # applied in order, relative to recipe d
 system = "autotools"          # "raw" | "autotools" | "meson" | "cmake" | "make"
 # system = "raw": steps is ONE shell script — a single `sh -eu` process,
 #   working dir = unpacked source tree. cd/export/variables PERSIST across
-#   lines. (Matches how legacy `build` files were sourced, so M3 migration
-#   is mechanical: the whole script moves into steps verbatim.)
+#   lines. The staging prefix is provided as the `DESTDIR` ENV VAR (plus
+#   `JOBS` and the subst names VERSION/EPOCH/...); NO positional args are
+#   passed. Legacy LFS `build` files used positional `$1` — migrated recipes
+#   rewrite it as `$DESTDIR` (mechanical, one sed); the builder does not
+#   re-introduce the positional convention.
 steps = [
     "./configure --prefix=/usr --shared",
     "make -j$JOBS",
