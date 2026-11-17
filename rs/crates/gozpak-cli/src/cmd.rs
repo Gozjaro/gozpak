@@ -293,8 +293,8 @@ pub fn list_remote(_ctx: &Ctx, names: &[String]) -> i32 {
         })
     });
     shown.dedup();
-    for (_, _, _, _, disp) in &shown {
-        println!("{}", disp);
+    for (name, _, _, _, disp) in &shown {
+        println!("{} {}", name, disp);
     }
     if !names.is_empty() {
         let known: Vec<&String> = entries.iter().map(|e| &e.name).collect();
