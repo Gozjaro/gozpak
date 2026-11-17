@@ -74,6 +74,7 @@ pub fn source_from_line(raw: &str, dest: Option<&str>) -> Option<Source> {
                 url: raw.to_string(),
                 sha256: None,
                 dest: dest.map(str::to_string),
+                strip_topdir: None,
             }],
         });
     }

@@ -34,14 +34,20 @@ replaces       = []            # "name" — this package supersedes it
 [source]
 # multiple files: array of { url, sha256 }; sha256 REQUIRED for non-git sources
 urls = [
-    { url = "https://www.openssl.org/source/openssl-$VERSION.tar.xz",
-      sha256 = "..." },
+    { url = "https://www.openssl.org/source/openssl-$VERSION.tar.xz", sha256 = "..." },
 ]
 # archives (tar.xz/tar.gz/tgz/tar.bz2/tbz2/tar) are unpacked (top-level dir
 # stripped); any other file (a prebuilt binary, a patch used directly) is
 # placed in the source directory as-is under its file name, so `raw`
 # build steps can reference it by that name:
 # urls = [ { url = "https://…/gozpak-x86_64", sha256 = "…" } ]
+# per-entry opt-out: set strip_topdir = false on an archive entry to keep
+# its top-level dir in place (e.g. a source tree + a boot JDK shipped as
+# two tarballs whose build steps reference the top dirs by name):
+# urls = [
+#     { url = "…/src.tar.gz", sha256 = "…", strip_topdir = false },
+#     { url = "…/bootjdk.tar.gz", sha256 = "…", strip_topdir = false },
+# ]
 # OR a git source — pinned ref is MANDATORY (commit hash or tag, no branches):
 # git = "git+https://github.com/org/repo#d41d8cd9"
 patches = ["patches/fix-build.patch"]   # applied in order, relative to recipe dir

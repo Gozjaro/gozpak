@@ -55,6 +55,9 @@ pub struct SourceFile {
     /// Checksum; REQUIRED for non-git sources (M1: a warning when missing).
     pub sha256: Option<String>,
     pub dest: Option<String>,
+    /// `None` = default (tarballs strip the top-level dir, M2a);
+    /// `Some(false)` keeps the archive's top-level dir in place.
+    pub strip_topdir: Option<bool>,
 }
 
 /// One source entry after normalizing both formats.

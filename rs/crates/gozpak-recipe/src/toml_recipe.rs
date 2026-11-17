@@ -112,6 +112,12 @@ pub struct SourceSection {
 pub struct UrlEntry {
     pub url: String,
     pub sha256: Option<String>,
+    /// Opt out of `--strip-components=1` for this archive (M2a strips
+    /// the top-level dir by default). Set `false` when the recipe's
+    /// build steps reference the archive's top-level dir by name
+    /// (e.g. a source tree + a boot JDK shipped as two tarballs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strip_topdir: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -321,6 +327,7 @@ impl TomlRecipe {
                             url: u.url.clone(),
                             sha256: u.sha256.clone(),
                             dest: None,
+                            strip_topdir: u.strip_topdir,
                         }
                     })
                     .collect();

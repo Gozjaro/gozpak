@@ -116,21 +116,18 @@ pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, Buil
                         fetch(pkg, cache, &url, f.sha256.as_deref())?
                     };
                     if is_tarball(&file) {
-                        proc::run(
-                            pkg,
-                            &work.extract,
-                            "tar",
-                            &[
-                                "xf",
-                                file.to_str().ok_or_else(|| BuildError::Io(std::io::Error::other(
-                                    format!("non-UTF8 path: {}", file.display()),
-                                )))?,
-                                "-C",
-                                work.extract.to_str().unwrap(),
-                                "--strip-components=1",
-                            ],
-                            &[],
-                        )?;
+                        let mut args: Vec<&str> = vec![
+                            "xf",
+                            file.to_str().ok_or_else(|| BuildError::Io(std::io::Error::other(
+                                format!("non-UTF8 path: {}", file.display()),
+                            )))?,
+                            "-C",
+                            work.extract.to_str().unwrap(),
+                        ];
+                        if f.strip_topdir.unwrap_or(true) {
+                            args.push("--strip-components=1");
+                        }
+                        proc::run(pkg, &work.extract, "tar", &args, &[])?;
                     } else {
                         // Non-archive file source (a prebuilt binary, a
                         // patch used directly, …): place it in the source
@@ -441,6 +438,37 @@ mod tests {
         let work = Work::create(&t, "p").unwrap();
         let srcdir = stage(&recipe, &work, &t.join("cache")).unwrap();
         assert!(srcdir.join("file.txt").is_file(), "top-level dir stripped");
+    }
+
+    #[test]
+    fn tarball_top_dir_kept_when_strip_topdir_false() {
+        let t = temp("extract-keep");
+        let src_dir = t.join("s");
+        std::fs::create_dir_all(src_dir.join("top/sub")).unwrap();
+        std::fs::write(src_dir.join("top/file.txt"), b"content\n").unwrap();
+        let tb = make_tarball(&src_dir, "data.tar.gz");
+        let dir = t.join("recipe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("recipe.toml"),
+            format!(
+                "[package]\nname = \"t\"\nversion = \"1.0\"\nrelease = 1\n\n[source]\nurls = [ {{ url = \"{f}\", sha256 = \"{s}\", strip_topdir = false }} ]\n",
+                f = tb.display(),
+                s = sha256::hash_file(&tb).unwrap()
+            ),
+        )
+        .unwrap();
+        let recipe = Recipe::load(&dir).unwrap();
+        let work = Work::create(&t, "p").unwrap();
+        let srcdir = stage(&recipe, &work, &t.join("cache")).unwrap();
+        assert!(
+            srcdir.join("top/file.txt").is_file(),
+            "top-level dir kept when strip_topdir = false"
+        );
+        assert!(
+            !srcdir.join("file.txt").exists(),
+            "contents must NOT be flattened into the source dir"
+        );
     }
 
     #[test]
