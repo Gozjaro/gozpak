@@ -5,7 +5,7 @@
 //! index + `.gpkg` install) and the packaging-host tools
 //! `index-build`/`sign`/`keygen`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gozpak_core::{paths, sha256};
 use gozpak_recipe::{subst, Recipe, RecipeKind, Source};
@@ -202,10 +202,38 @@ fn proc_root() -> PathBuf {
             return PathBuf::from(v);
         }
     }
-    paths::source_cache_dir()
+    let root = paths::source_cache_dir()
         .parent()
         .map(|p| p.join("proc"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/gozpak/proc"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/gozpak/proc"));
+    gc_stale_proc(&root);
+    root
+}
+
+/// Reclaim scratch dirs left by dead runs so sequential builds don't pile
+/// up on small volumes (kernel builds peak ~23G against a 40G partition).
+/// Each run gets a unique `proc/<pid>`; anything modified more than 4h
+/// ago is safe — a whole build fits inside that window, so nothing a
+/// concurrent live build is using is ever touched.
+fn gc_stale_proc(root: &Path) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let Ok(md) = e.metadata() else {
+            continue;
+        };
+        let Ok(mtime) = md.modified() else {
+            continue;
+        };
+        let stale = mtime
+            .elapsed()
+            .map(|d| d > std::time::Duration::from_secs(4 * 3600))
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
