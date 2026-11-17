@@ -19,6 +19,8 @@
 //! tarball would not).
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::collections::HashMap;
 
 use gozpak_core::sha256;
 use gozpak_recipe::Recipe;
@@ -166,8 +168,107 @@ pub fn rootfs_sha256(root: &Path) -> Result<String, BuildError> {
     Ok(sha256::hash_hex(&blob.as_bytes()))
 }
 
-/// Copy a tree, preserving symlinks (a packaged tree may install
-/// symlinks; the .gpkg must carry them, not their targets).
+/// Copy a tree into the staging area, preserving symlinks AND
+/// hardlinks.
+///
+/// - Symlinks: packaged as symlinks (the .gpkg must carry them, not
+///   their targets).
+/// - Hardlinks: a tree may contain hardlinked regular files (git's
+///   `make install` hardlinks every `git-*` subcommand onto the single
+///   dispatcher binary; perl hardlinks its library files). Copying
+///   each occurrence's *content* would duplicate the bytes N times —
+///   for git that is ~280 × 20 MB, and zstd (8 MB window) cannot
+///   dedupe across the copies. Instead, the first path of each
+///   `(dev, ino)` inode pair is copied once; every later path of the
+///   same inode becomes a real hardlink in the staging tree, so the
+///   system `tar` records it as one hardlink entry and the bytes are
+///   stored (and compressed) exactly once.
+///
+/// On non-unix targets the legacy behavior (symlinks resolved, no
+/// hardlinks) is kept: hardlink tracking requires unix inodes.
+#[cfg(unix)]
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), BuildError> {
+    // Canonical member of each hardlink group = the sorted-first
+    // relative path of that inode (list_files is sorted), so the
+    // choice is deterministic and independent of readdir order.
+    let files = list_files(src)?;
+    let mut canonical: HashMap<(u64, u64), String> = HashMap::new();
+    for rel in &files {
+        let p = src.join(rel);
+        let ft = std::fs::symlink_metadata(&p)?.file_type();
+        if ft.is_symlink() {
+            continue;
+        }
+        use std::os::unix::fs::MetadataExt;
+        let meta = p.metadata()?;
+        canonical
+            .entry((meta.dev(), meta.ino()))
+            .or_insert_with(|| rel.clone());
+    }
+
+    // Phase 1: create the directory skeleton.
+    let mut dirs = Vec::new();
+    walk_dirs(src, &mut dirs)?;
+    for p in &dirs {
+        let rel = p
+            .strip_prefix(src)
+            .map(|r| r.display().to_string())
+            .ok()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_default();
+        if !rel.is_empty() {
+            std::fs::create_dir_all(dst.join(&rel))?;
+        }
+    }
+
+    // Phase 2: files in sorted relative-path order. The canonical
+    // member of a hardlink group sorts first, so when a later path of
+    // the same inode is reached its link target already exists.
+    for rel in &files {
+        let p = src.join(rel);
+        let q = dst.join(rel);
+        let ft = std::fs::symlink_metadata(&p)?.file_type();
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&p)?;
+            use std::os::unix::fs::symlink;
+            symlink(&target, &q)?;
+        } else {
+            use std::os::unix::fs::MetadataExt;
+            let meta = p.metadata()?;
+            let key = (meta.dev(), meta.ino());
+            let canon = canonical
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| BuildError::Io(std::io::Error::other("no canonical inode")))?;
+            if canon == *rel {
+                std::fs::copy(&p, &q)?;
+            } else {
+                std::fs::hard_link(dst.join(&canon), &q)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect every directory under `src` (excluding `src` itself),
+/// depth-first, into `out`.
+#[cfg(unix)]
+fn walk_dirs(src: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let p = entry.path();
+        if entry.file_type()?.is_dir() {
+            out.push(p.clone());
+            walk_dirs(&p, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Non-unix: the legacy copy (symlinks resolved to their targets when
+/// they point inside the tree, otherwise a content copy). Hardlinks
+/// are not tracked on this target.
+#[cfg(not(unix))]
 fn copy_tree(src: &Path, dst: &Path) -> Result<(), BuildError> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -177,12 +278,6 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), BuildError> {
         let ft = entry.file_type()?;
         if ft.is_symlink() {
             let target = std::fs::read_link(&p)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::symlink;
-                symlink(&target, &q)?;
-            }
-            #[cfg(not(unix))]
             if target.is_dir() {
                 copy_tree(&target, &q)?;
             } else {
@@ -367,6 +462,85 @@ mod tests {
                 "4059dba5b727785d7d409ec6c645a077f25fe7c8bb8242e43e74aff690567395"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_preserves_hardlinks_not_duplicated_content() {
+        // A hardlink group (two paths, one inode) must be archived
+        // as one file + one tar hardlink entry — never as two copies
+        // of the content (the git-git-* case: 280 × 20 MB).
+        use gozpak_core::VersionRel;
+        use gozpak_recipe::{Recipe, RecipeKind};
+        use std::os::unix::fs::MetadataExt;
+
+        let t = temp("hardlink");
+        let dest = t.join("dest");
+        std::fs::create_dir_all(dest.join("usr/libexec")).unwrap();
+        let canon = dest.join("usr/libexec/git");
+        std::fs::write(&canon, b"payload-payload").unwrap();
+        let link = dest.join("usr/libexec/git-am");
+        std::fs::hard_link(&canon, &link).unwrap();
+
+        // Confirm the fixture really is one inode.
+        assert_eq!(canon.metadata().unwrap().ino(), link.metadata().unwrap().ino());
+
+        let recipe = Recipe {
+            kind: RecipeKind::Toml,
+            name: "git".into(),
+            epoch: 0,
+            version: VersionRel::new("1.0", "1"),
+            dir: t.clone(),
+            arch: Some("x86_64".into()),
+            desc: None,
+            license: None,
+            homepage: None,
+            depends: vec![],
+            build_depends: vec![],
+            provides: vec![],
+            conflicts: vec![],
+            replaces: vec![],
+            sources: vec![],
+            checksums: vec![],
+            meta: std::collections::BTreeMap::new(),
+            build_system: None,
+            build_steps: vec![],
+            meson_args: vec![],
+            cmake_args: vec![],
+            configure_args: vec![],
+            make_target: None,
+            install_post: vec![],
+            install_files: "auto".into(),
+            install_backup: vec![],
+            warnings: vec![],
+        };
+
+        let out_dir = t.join("out");
+        let p = pack(&recipe, &dest, &t, &out_dir, false).unwrap();
+
+        // Both paths are listed as files.
+        assert_eq!(p.files, vec!["usr/libexec/git", "usr/libexec/git-am"]);
+
+        // The archive must be far smaller than two copies of the
+        // content would be: the second entry is a tar hardlink.
+        let bytes = std::fs::read(&p.gpkg).unwrap();
+        let raw = zstd::decode_all(&bytes[..]).unwrap();
+        let extracted = t.join("extracted");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let tarball = t.join("decoded-hl.tar");
+        std::fs::write(&tarball, &raw).unwrap();
+        let status = std::process::Command::new("tar")
+            .args(["xf", &tarball.display().to_string(), "-C", &extracted.display().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let a = extracted.join("rootfs/usr/libexec/git");
+        let b = extracted.join("rootfs/usr/libexec/git-am");
+        assert_eq!(std::fs::read(&a).unwrap(), b"payload-payload");
+        assert_eq!(std::fs::read(&b).unwrap(), b"payload-payload");
+        // And the hardlink survived the round trip: same inode.
+        assert_eq!(a.metadata().unwrap().ino(), b.metadata().unwrap().ino());
     }
 
     #[test]
