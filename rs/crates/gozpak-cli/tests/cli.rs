@@ -248,7 +248,9 @@ fn checksum_remote_only_source_without_cache_is_noop() {
 
 #[test]
 fn stub_commands_report_not_implemented() {
-    for action in ["b", "i", "g", "r", "d", "f", "S", "L", "u", "U", "a"] {
+    // `b`/`build` left this list in M2a (it is implemented now); the
+    // remaining stubs still report "not implemented in M1".
+    for action in ["i", "g", "r", "d", "f", "S", "L", "u", "U", "a"] {
         let o = gozpak(&[], &[action, "somepkg"]);
         assert_eq!(o.status.code(), Some(1), "action {action}");
         let err = out_str(&o.stderr);
@@ -291,6 +293,88 @@ fn extension_fallback_found_in_path_refused_in_m1() {
     assert!(err.contains("not implemented in M1"), "stderr: {err}");
     // The extension itself must not have run.
     assert!(!out_str(&o.stdout).contains("never"));
+}
+
+// ---------------------------------------------------------------------------
+// M2a: build / repo-build (stage + build + pack)
+// ---------------------------------------------------------------------------
+
+/// The workspace-level M2a fixture (`rs/tests/fixtures`), two levels up
+/// from this crate.
+fn m2a_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .canonicalize()
+        .expect("rs/tests/fixtures exists")
+}
+
+/// Run a pipeline command hermetically with isolated cache + work dirs.
+fn m2a(vars_extra: &[(&str, &str)], args: &[&str]) -> (std::process::Output, PathBuf, PathBuf) {
+    let cache = scratch("m2a-cache");
+    let tmpdir = scratch("m2a-proc");
+    let fixtures = m2a_fixtures();
+    let fixtures_str = fixtures.to_str().unwrap();
+    let cache_str = cache.to_str().unwrap();
+    let tmpdir_str = tmpdir.to_str().unwrap();
+    let mut vars: Vec<(&str, &str)> = vec![
+        ("GOZPAK_PATH", fixtures_str),
+        ("XDG_CACHE_HOME", cache_str),
+        ("GOZPAK_TMPDIR", tmpdir_str),
+    ];
+    vars.extend(vars_extra.iter().copied());
+    let o = gozpak(&vars, args);
+    (o, cache, tmpdir)
+}
+
+#[test]
+fn repo_build_fixture_produces_gpkg() {
+    let (o, cache, _) = m2a(&[], &["repo-build", "hello-raw"]);
+    assert_eq!(o.status.code(), Some(0), "stderr: {}", out_str(&o.stderr));
+    let gpkg = cache.join("gozpak/bin/hello-raw-1.0.0-1.gpkg");
+    assert!(gpkg.is_file(), "missing {gpkg:?}");
+    // stdout: one sha256sum-style line: `<sha256>  <path>`.
+    let stdout = out_str(&o.stdout);
+    let expected_hash = gozpak_core::sha256::hash_file(&gpkg).unwrap();
+    let line = format!("{expected_hash}  {}", gpkg.display());
+    assert!(stdout.contains(&line), "stdout: {stdout}");
+    // stderr log trail.
+    let err = out_str(&o.stderr);
+    assert!(err.contains("staging sources"), "stderr: {err}");
+    assert!(err.contains("built"), "stderr: {err}");
+    assert!(err.contains("packed"), "stderr: {err}");
+}
+
+#[test]
+fn build_alias_packs_without_repo_metadata() {
+    let (o, cache, _) = m2a(&[], &["b", "hello-raw"]);
+    assert_eq!(o.status.code(), Some(0), "stderr: {}", out_str(&o.stderr));
+    let gpkg = cache.join("gozpak/bin/hello-raw-1.0.0-1.gpkg");
+    assert!(gpkg.is_file(), "missing {gpkg:?}");
+    let stdout = out_str(&o.stdout);
+    let expected_hash = gozpak_core::sha256::hash_file(&gpkg).unwrap();
+    assert!(stdout.contains(&expected_hash), "stdout: {stdout}");
+}
+
+#[test]
+fn repo_build_b_flag_builds_without_packing() {
+    let (o, cache, _) = m2a(&[], &["repo-build", "-b", "hello-raw"]);
+    assert_eq!(o.status.code(), Some(0), "stderr: {}", out_str(&o.stderr));
+    let bin = cache.join("gozpak/bin");
+    assert!(
+        !bin.exists() || bin.read_dir().unwrap().next().is_none(),
+        "-b must not write a .gpkg"
+    );
+    let err = out_str(&o.stderr);
+    assert!(err.contains("build-only"), "stderr: {err}");
+}
+
+#[test]
+fn repo_build_unknown_package_is_error() {
+    let (o, _, _) = m2a(&[], &["repo-build", "no-such-pkg"]);
+    assert_eq!(o.status.code(), Some(1));
+    let err = out_str(&o.stderr);
+    assert!(err.contains("ERROR"), "stderr: {err}");
+    assert!(err.contains("not found"), "stderr: {err}");
 }
 
 // ---------------------------------------------------------------------------

@@ -13,9 +13,15 @@ pub enum Action {
     Search,
     /// `checksum` — implemented in M1.
     Checksum,
+    /// `build` — M2a: stage + build + pack, no repo metadata.
+    Build,
+    /// `repo-build` — M2a: stage + build + pack with repo metadata
+    /// (`[manifest].repo` / `built_by`); the `-b` flag (recorded in
+    /// [`Parsed::build_only`]) skips the pack step.
+    RepoBuild,
     /// A command the shell version has but M1 only stubs out.
     ///
-    /// install, build, get, remove, download, fetch, sync, list-remote,
+    /// install, get, remove, download, fetch, sync, list-remote,
     /// update, upgrade, alternatives.
     Stub {
         /// Canonical (full) command name, e.g. "install".
@@ -31,10 +37,13 @@ pub struct Parsed {
     /// `None` when the action is neither known nor an alias — i.e. it is an
     /// extension candidate (`gozpak-<action_raw>`), see `ext::fallback`.
     pub action: Option<Action>,
-    /// Package-name arguments (everything after the action).
+    /// Package-name arguments (everything after the action, flags
+    /// stripped).
     pub names: Vec<String>,
     /// `-y` / `--yes` was given (shell: sets `GOZPAK_PROMPT=0`).
     pub yes: bool,
+    /// `repo-build -b` / `--build-only`: build only, skip the pack step.
+    pub build_only: bool,
 }
 
 /// Single-letter aliases, mirroring the shell `args()` case table
@@ -70,14 +79,29 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
 
     let action_raw = rest.first().cloned().map(String::as_str).unwrap_or("");
-    let names: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
     let action = resolve_action(action_raw);
+
+    // `repo-build` carries its own `-b`/`--build-only` flag (build only,
+    // skip the pack step); strip it from the package-name list.
+    let mut build_only = false;
+    if matches!(action, Some(Action::RepoBuild)) {
+        names.retain(|n| {
+            if n == "-b" || n == "--build-only" {
+                build_only = true;
+                false
+            } else {
+                true
+            }
+        });
+    }
 
     Parsed {
         action_raw: action_raw.to_string(),
         action,
         names,
         yes,
+        build_only,
     }
 }
 
@@ -98,8 +122,9 @@ fn resolve_action(raw: &str) -> Option<Action> {
         "list" => Action::List,
         "search" => Action::Search,
         "checksum" => Action::Checksum,
+        "build" => Action::Build,
+        "repo-build" => Action::RepoBuild,
         "install" => Action::Stub { name: "install" },
-        "build" => Action::Stub { name: "build" },
         "get" => Action::Stub { name: "get" },
         "remove" => Action::Stub { name: "remove" },
         "download" => Action::Stub { name: "download" },
@@ -183,5 +208,39 @@ mod tests {
         // Lowercase s = search; uppercase S = sync (stub).
         assert_eq!(parse(&[v("s")]).action, Some(Action::Search));
         assert!(is_stub(&parse(&[v("S")]).action));
+    }
+
+    #[test]
+    fn build_and_repo_build_resolve_to_actions() {
+        assert_eq!(parse(&[v("b")]).action, Some(Action::Build));
+        assert_eq!(parse(&[v("build")]).action, Some(Action::Build));
+        assert_eq!(parse(&[v("repo-build")]).action, Some(Action::RepoBuild));
+    }
+
+    #[test]
+    fn repo_build_build_only_flag_is_stripped() {
+        let p = parse(&[v("repo-build"), v("-b"), v("zlib")]);
+        assert_eq!(p.action, Some(Action::RepoBuild));
+        assert!(p.build_only);
+        assert_eq!(p.names, vec![v("zlib")]);
+
+        let p = parse(&[v("repo-build"), v("--build-only"), v("zlib")]);
+        assert!(p.build_only);
+        assert_eq!(p.names, vec![v("zlib")]);
+
+        // Without the flag: build_only stays false, names untouched.
+        let p = parse(&[v("repo-build"), v("zlib")]);
+        assert!(!p.build_only);
+        assert_eq!(p.names, vec![v("zlib")]);
+    }
+
+    #[test]
+    fn b_flag_on_plain_build_is_just_a_name() {
+        // Only repo-build understands -b; a plain build keeps it
+        // verbatim in the name list.
+        let p = parse(&[v("b"), v("-b"), v("zlib")]);
+        assert_eq!(p.action, Some(Action::Build));
+        assert!(!p.build_only);
+        assert_eq!(p.names, vec![v("-b"), v("zlib")]);
     }
 }

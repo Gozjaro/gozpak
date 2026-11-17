@@ -1,5 +1,6 @@
 //! M1 command implementations: version, list, search, checksum, usage,
-//! and the not-implemented stubs.
+//! and the not-implemented stubs. M2a adds `build`/`repo-build`
+//! (stage + build + pack via `gozpak-build`).
 
 use std::path::PathBuf;
 
@@ -13,7 +14,7 @@ use crate::Ctx;
 pub fn usage() {
     log_line("gozpak [a|b|c|d|f|g|i|l|L|r|s|S|u|U|v] [pkg]...", "");
     log_line("alternatives List and swap alternatives", "");
-    log_line("build        Build packages", "");
+    log_line("build        Build and pack packages (no repo metadata)", "");
     log_line("checksum     Generate checksums", "");
     log_line("download     Download sources", "");
     log_line("fetch        Download binary packages (no install)", "");
@@ -22,6 +23,7 @@ pub fn usage() {
     log_line("list         List installed packages", "");
     log_line("list-remote  List packages in remote repositories", "");
     log_line("remove       Remove packages", "");
+    log_line("repo-build [-b] pkg...   Build and pack .gpkg packages (repo metadata)", "");
     log_line("search       Search for packages", "");
     log_line("sync         Sync remote repository indices", "");
     log_line("update       Update the system and repositories", "");
@@ -30,10 +32,12 @@ pub fn usage() {
     log_line("", "");
     log_line("Global flags:", "");
     log_line("  -y, --yes  Skip all confirmation prompts", "");
+    log_line("  -b         (repo-build only) build only, skip the pack step", "");
     log_line("", "");
     log_line(
-        "M1 note: version, list, search and checksum are functional; \
-         all other commands are stubs.",
+        "M1 note: version, list, search and checksum are the read \
+         commands; build and repo-build are functional in M2a (stage, \
+         build, pack .gpkg tar.zst); all other commands are still stubs.",
         "",
     );
 }
@@ -109,6 +113,93 @@ pub fn checksum(ctx: &Ctx, names: &[String]) -> i32 {
         run_checksum(&recipe, ctx);
     }
     0
+}
+
+/// `b`/`build` and `repo-build` — the M2a build pipeline:
+/// stage sources, run the `[build]` section, pack a `.gpkg` (tar.zst).
+///
+/// - `repo_meta = true` (`repo-build`): the manifest carries the repo
+///   metadata (`[manifest].repo` + `built_by`).
+/// - `pack = false` (`repo-build -b`): build only — the DESTDIR tree
+///   is left in the work dir, no `.gpkg` is written.
+///
+/// Recipes load from `GOZPAK_PATH` (plus the current directory's
+/// parent, like every other command). The finished `.gpkg` lands in
+/// the binary cache (`<cache>/gozpak/bin`); stdout gets one
+/// sha256sum-style line `<sha256>  <path>` per packed package.
+pub fn build(ctx: &Ctx, names: &[String], repo_meta: bool, pack: bool) -> i32 {
+    let (queries, extra_base) = pwd_fallback(names);
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(p) = extra_base {
+        bases.push(p);
+    }
+    bases.extend(ctx.recipe_paths.iter().cloned());
+
+    for q in &queries {
+        let dir = match Recipe::find(q, &bases) {
+            Some(d) => d,
+            None => die(q, "not found"),
+        };
+        let recipe = match Recipe::load(&dir) {
+            Ok(r) => r,
+            Err(e) => die(q, &format!("invalid recipe: {e}")),
+        };
+        if recipe.kind == RecipeKind::Legacy {
+            die(
+                &recipe.name,
+                "legacy recipe cannot be built in M2a (recipe.toml only; \
+                 migration is M3)",
+            );
+        }
+        for w in &recipe.warnings {
+            war(&recipe.name, w);
+        }
+
+        let opts = gozpak_build::Opts {
+            work_root: proc_root().join(std::process::id().to_string()),
+            source_cache: paths::source_cache_dir(),
+            out_dir: paths::bin_cache_dir(),
+            repo_meta,
+        };
+
+        log_line(&recipe.name, "staging sources");
+        let report = match gozpak_build::pipeline(&recipe, &opts, pack) {
+            Ok(r) => r,
+            Err(e) => die(&recipe.name, &e.to_string()),
+        };
+        log_line(&recipe.name, "built");
+
+        match report.packed {
+            Some(packed) => {
+                log_line(&recipe.name, &format!("packed {}", packed.gpkg.display()));
+                println!("{}  {}", packed.gpkg_sha256, packed.gpkg.display());
+            }
+            None => {
+                log_line(
+                    &recipe.name,
+                    &format!(
+                        "build-only: DESTDIR at {} (no .gpkg)",
+                        report.dest.display()
+                    ),
+                );
+            }
+        }
+    }
+    0
+}
+
+/// The per-run process temp root (shell `create_tmp_dirs` `proc`):
+/// `$GOZPAK_TMPDIR` when set, else `<cache>/gozpak/proc`.
+fn proc_root() -> PathBuf {
+    if let Ok(v) = std::env::var("GOZPAK_TMPDIR") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    paths::source_cache_dir()
+        .parent()
+        .map(|p| p.join("proc"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/gozpak/proc"))
 }
 
 /// `pkg_order`-free stub for M2/M3 commands. Mirrors the shell log style

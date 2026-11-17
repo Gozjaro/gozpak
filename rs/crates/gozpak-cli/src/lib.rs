@@ -2,13 +2,14 @@
 //!
 //! M1 is read-only parity with the shell version:
 //!
-//! | command        | M1 status                                   |
+//! | command        | M1/M2a status                               |
 //! |----------------|---------------------------------------------|
 //! | `version` (v)  | implemented                                 |
 //! | `list` (l)     | implemented (installed DB)                  |
 //! | `search` (s)   | implemented (recipes under `GOZPAK_PATH`)   |
 //! | `checksum` (c) | implemented (local + cached sources only)   |
-//! | install/build/get/remove/download/fetch/sync/list-remote/update/upgrade/alternatives | stubbed — "not implemented in M1" |
+//! | `build` / `repo-build` | M2a: stage + build + pack `.gpkg` |
+//! | install/get/remove/download/fetch/sync/list-remote/update/upgrade/alternatives | stubbed — "not implemented in M1" |
 //! | unknown word   | extension fallback stub (`gozpak-<word>`)   |
 //!
 //! Environment honored: `GOZPAK_ROOT`, `GOZPAK_PATH`, `GOZPAK_REPOS`
@@ -85,6 +86,12 @@ fn dispatch(ctx: &Ctx, parsed: &args::Parsed) -> i32 {
         Some(args::Action::List) => cmd::list(ctx, &parsed.names),
         Some(args::Action::Search) => cmd::search(ctx, &parsed.names),
         Some(args::Action::Checksum) => cmd::checksum(ctx, &parsed.names),
+        // M2a: build + pack. `repo-build` carries the repo metadata;
+        // `-b` (repo-build only) skips the pack step.
+        Some(args::Action::Build) => cmd::build(ctx, &parsed.names, false, true),
+        Some(args::Action::RepoBuild) => {
+            cmd::build(ctx, &parsed.names, true, !parsed.build_only)
+        }
         Some(args::Action::Stub { name }) => cmd::stub(name, &parsed.names),
         None => {
             if parsed.action_raw.is_empty() {

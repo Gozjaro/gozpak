@@ -1,0 +1,35 @@
+# M2a end-to-end fixture: a tiny raw-build recipe that installs three
+# files into $DESTDIR. Used by gozpak-build's e2e tests and by
+# `gozpak repo-build hello-raw` with GOZPAK_PATH=rs/tests/fixtures.
+#
+# The build steps use shell double-quotes so the builder's environment
+# table ($DESTDIR/$VERSION/$RELEASE/$EPOCH/$PACKAGE/$JOBS) is expanded
+# by the shell at run time — that is exactly what the v1.2 substitution
+# table is for.
+[package]
+name = "hello-raw"
+version = "1.0.0"
+release = 1
+arch = "x86_64"
+desc = "M2a fixture: raw build, three installed files"
+license = "MIT"
+
+[source]
+urls = [
+    { url = "hello-raw-src.tar.gz", sha256 = "fadca494b3a34f54043bb3101eed7c066cd1d0d817956c0b3cf462ef0556590c" },
+]
+
+[build]
+system = "raw"
+steps = [
+    "mkdir -p \"$DESTDIR/bin\" \"$DESTDIR/etc\" \"$DESTDIR/share/hello-raw\"",
+    "printf \"hello from hello-raw $VERSION release $RELEASE epoch $EPOCH jobs $JOBS\\n\" > \"$DESTDIR/bin/hello-raw\"",
+    "printf \"repo=$PACKAGE\\n\" > \"$DESTDIR/etc/hello-raw.conf\"",
+    "cp README.txt \"$DESTDIR/share/hello-raw/README.txt\"",
+]
+
+[install]
+files = "auto"
+
+[meta]
+repo = "gozjaro"

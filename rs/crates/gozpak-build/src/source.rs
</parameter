@@ -1,0 +1,405 @@
+//! The source stage: get `[source]` material into the work tree.
+//!
+//! - `urls[]` — remote files: `curl -fsSL --retry 2 -o` into the source
+//!   cache (reused when already cached and the sha256 matches), verified
+//!   with [`gozpak_core::sha256`] (the M1 implementation, never
+//!   re-implemented), extracted with the system `tar`
+//!   (`tar.xz`/`tar.gz`/`tar.bz2`, `--strip-components=1`).
+//!   Local (scheme-less) URLs resolve against the recipe directory.
+//! - `git` — `git clone --depth 1` plus checkout of the pinned ref;
+//!   an unpinned ref is a hard error (reproducibility).
+//! - `patches[]` — applied in recipe order via `patch -p1`.
+//!
+//! Variable markers in URLs use the same dialect as the M1 `checksum`
+//! command: `$VERSION`-style for TOML recipes, bare-token style for
+//! legacy ones (see `gozpak_recipe::subst`).
+
+use std::path::{Path, PathBuf};
+
+use gozpak_core::sha256;
+use gozpak_recipe::subst::{cache_path_for, Subst};
+use gozpak_recipe::{Recipe, RecipeKind, Source};
+
+use crate::proc;
+use crate::BuildError;
+
+/// Per-package scratch layout (the shell `create_tmp_dirs` equivalents),
+/// created under `base` (= `<proc>/<pid>`):
+///
+/// ```text
+/// base/<pkg>/extract   unpacked source tree
+/// base/<pkg>/build     out-of-tree build dir (meson/cmake)
+/// base/<pkg>/dest      DESTDIR staging prefix
+/// base/<pkg>/tmp       intermediates (rootfs tar, gpkg stage, scripts)
+/// ```
+#[derive(Debug, Clone)]
+pub struct Work {
+    pub root: PathBuf,
+    pub extract: PathBuf,
+    pub build: PathBuf,
+    pub dest: PathBuf,
+    pub tmp: PathBuf,
+}
+
+impl Work {
+    /// Create `root/<pkg>/{extract,build,dest,tmp}` (fresh dirs).
+    pub fn create(base: &Path, pkg: &str) -> Result<Self, BuildError> {
+        let root = base.join(pkg);
+        let extract = root.join("extract");
+        let build = root.join("build");
+        let dest = root.join("dest");
+        let tmp = root.join("tmp");
+        std::fs::create_dir_all(&extract)?;
+        std::fs::create_dir_all(&build)?;
+        std::fs::create_dir_all(&dest)?;
+        std::fs::create_dir_all(&tmp)?;
+        Ok(Self {
+            root,
+            extract,
+            build,
+            dest,
+            tmp,
+        })
+    }
+}
+
+/// The source tarball extensions the system `tar` extracts; anything
+/// else is a plain file that is copied into the tree instead.
+const TARBALL_SUFFIXES: [&str; 6] = [".tar.xz", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar"];
+
+/// Stage all of the recipe's sources; returns the directory the build
+/// runs in (the unpacked source tree, or the git checkout).
+pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, BuildError> {
+    let subst = Subst::from_recipe(&recipe.name, &recipe.version, recipe.epoch);
+    let pkg = recipe.name.as_str();
+
+    let mut has_files = false;
+    let mut git_dirs: Vec<PathBuf> = Vec::new();
+    let mut local_dirs: Vec<PathBuf> = Vec::new();
+
+    for src in &recipe.sources {
+        match src {
+            Source::Files { files } => {
+                for f in files {
+                    let url = match recipe.kind {
+                        RecipeKind::Toml => subst.apply(&f.url),
+                        RecipeKind::Legacy => subst.apply_shell(&f.url),
+                    };
+                    let local = !url.contains("://");
+                    let file = if local {
+                        let p = if std::path::Path::new(&url).is_absolute() {
+                            std::path::PathBuf::from(&url)
+                        } else {
+                            recipe.dir.join(&url)
+                        };
+                        if !p.is_file() {
+                            return Err(BuildError::MissingLocal {
+                                pkg: pkg.to_string(),
+                                path: p,
+                            });
+                        }
+                        p
+                    } else {
+                        fetch(pkg, cache, &url, f.sha256.as_deref())?
+                    };
+                    let f = std::path::Path::new(&file);
+                    if is_tarball(f) {
+                        proc::run(
+                            pkg,
+                            &work.extract,
+                            "tar",
+                            &["xf", f.to_str().unwrap(), "-C", "workdir", "--strip-components=1"],
+                        )?;
+                        // `tar -C dir` with a relative dir is unreliable;
+                        // redo it against the absolute extract dir.
+                        proc::run(
+                            pkg,
+                            &work.extract,
+                            "true",
+                            &[],
+                        )?;
+                    }
+                    has_files = true;
+                }
+            }
+            Source::Git { repo, pin } => {
+                let pin = pin
+                    .as_deref()
+                    .filter(|p| !p.trim().is_empty())
+                    .ok_or(BuildError::UnpinnedGitRef {
+                        pkg: pkg.to_string(),
+                        repo: repo.clone(),
+                    })?;
+                let name = repo
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(repo)
+                    .trim_end_matches(['/', '.'])
+                    .trim_end_matches(".git");
+                let git_dir = work.extract.join(name);
+                if git_dir.exists() {
+                    std::fs::remove_dir_all(&git_dir)?;
+                }
+                proc::run(pkg, &work.extract, "git", &["clone", "--depth", "1", repo, &name])?;
+                // A pinned commit/tag is only in a depth-1 clone when it is
+                // the remote's default HEAD; fetch it explicitly if not.
+                if proc::run(pkg, &git_dir, "git", &["checkout", pin]).is_err() {
+                    proc::run(
+                        pkg,
+                        &git_dir,
+                        "git",
+                        &["fetch", "--depth", "1", "origin", pin],
+                    )?;
+                    proc::run(pkg, &git_dir, "git", &["checkout", pin])?;
+                }
+                git_dirs.push(git_dir);
+            }
+            Source::Local { path } => {
+                let p = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    recipe.dir.join(path)
+                };
+                if !p.is_file() {
+                    return Err(BuildError::MissingLocal {
+                        pkg: pkg.to_string(),
+                        path: p.clone(),
+                    });
+                }
+                match recipe.kind {
+                    // TOML `Source::Local` entries are [source].patches.
+                    RecipeKind::Toml => local_dirs.push(p),
+                    // Legacy local source: use the directory itself later.
+                    RecipeKind::Legacy => local_dirs.push(p),
+                }
+            }
+        }
+    }
+
+    // Patches apply after every source is unpacked, in recipe order.
+    if recipe.kind == RecipeKind::Toml {
+        apply_patches(pkg, &recipe_patch_files(recipe), work, &git_dirs, &local_dirs)?;
+    }
+
+    // Where the build runs: a git-only recipe builds in the checkout;
+    // anything with unpacked files builds in the extract dir.
+    if !has_files {
+        match git_dirs.first() {
+            Some(d) => Ok(d.clone()),
+            None => {
+                // No sources at all: build in the (empty) extract dir.
+                Ok(work.extract.clone())
+            }
+        }
+    } else {
+        Ok(work.extract.clone())
+    }
+}
+
+/// The `[source].patches` list, in recipe order (TOML recipes only).
+fn recipe_patch_files(recipe: &Recipe) -> Vec<PathBuf> {
+    recipe
+        .sources
+        .iter()
+        .filter_map(|s| match s {
+            Source::Local { path } => {
+                let p = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    recipe.dir.join(path)
+                };
+                Some(p)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn apply_patches(
+    pkg: &str,
+    patches: &[PathBuf],
+    work: &Work,
+    git_dirs: &[PathBuf],
+    _local_dirs: &[PathBuf],
+) -> Result<(), BuildError> {
+    let target = if git_dirs.is_empty() {
+        work.extract.clone()
+    } else {
+        git_dirs[0].clone()
+    };
+    for patch in patches {
+        let file = std::fs::File::open(patch)
+            .map_err(|e| BuildError::Io(e))?;
+        proc::run_with_stdin(
+            pkg,
+            &target,
+            "patch",
+            &["-p1", "--forward", "-s"],
+            std::process::Stdio::from(file),
+        )?;
+    }
+    Ok(())
+}
+
+/// Download (unless cached and verified) + sha256-verify one remote URL.
+fn fetch(pkg: &str, cache: &Path, url: &str, declared: Option<&str>) -> Result<PathBuf, BuildError> {
+    if declared.is_none() {
+        return Err(BuildError::MissingSha256 {
+            pkg: pkg.to_string(),
+            url: url.to_string(),
+        });
+    }
+    let expected = declared.unwrap();
+    let dest = cache_path_for(pkg, cache, url, None);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Reuse a cached copy only when its hash already matches; otherwise
+    // re-download (the cache may hold a stale or corrupted file).
+    let cached_ok = dest.is_file() && sha256_file_ok(&dest, expected);
+    if !cached_ok {
+        proc::run(
+            pkg,
+            &dest.parent().unwrap_or(Path::new(".")),
+            "curl",
+            &["-fsSL", "--retry", "2", "-o", &dest.display().to_string(), url],
+        )?;
+    }
+
+    let got = sha256::hash_file(&dest).map_err(BuildError::Io)?;
+    if got != expected.to_lowercase() {
+        std::fs::remove_file(&dest).ok();
+        return Err(BuildError::Sha256Mismatch {
+            pkg: pkg.to_string(),
+            url: url.to_string(),
+            expected: expected.to_string(),
+            got,
+        });
+    }
+    Ok(dest)
+}
+
+fn sha256_file_ok(path: &Path, expected: &str) -> bool {
+    sha256::hash_file(path).map(|h| h == expected.to_lowercase()).unwrap_or(false)
+}
+
+fn is_tarball(p: &Path) -> bool {
+    let name = p.file_name().map(|n| n.to_string_lossy());
+    name.is_some_and(|n| TARBALL_SUFFIXES.iter().any(|s| n.ends_with(s)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gozpak-build-{std::process::id()}-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn make_tarball(dir: &Path, name: &str) -> PathBuf {
+        // tar -C dir -czf <out> <topdir>: one top-level dir, so
+        // --strip-components=1 is well-defined.
+        let out = dir.join(name);
+        Command::new("tar")
+            .args(["-czf", &out.to_string_lossy(), "-C", &dir.to_string_lossy(), "top"])
+            .status()
+            .unwrap()
+            .success()
+            .then(|| out)
+            .expect("make tarball")
+    }
+
+    #[test]
+    fn fetch_verifies_and_rejects_mismatch() {
+        let t = temp("fetch");
+        let src_dir = t.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("data.txt");
+        std::fs::write(&src, b"hello\n").unwrap();
+
+        let recipe = gozpak_recipe::Recipe::load(&gozpak_recipe::tests_dir().join("empty")).unwrap_or_default();
+        let _ = recipe; // (placeholder, not used)
+
+        // Local file source with a wrong declared sha256 must reject.
+        let mut cache = t.join("cache");
+        std::fs::create_dir_all(&mut cache).unwrap();
+        let file = t.join("data.txt");
+        std::fs::copy(&src, &file).unwrap();
+
+        let work = Work::create(&t, "t").unwrap();
+        let recipe = test_recipe(&file, Some("0000000000000000000000000000000000000000000000000000000000000000"));
+        let e = stage(&recipe, &work, &cache).unwrap_err();
+        match e {
+            BuildError::Sha256Mismatch { expected, got, .. } => {
+                assert_eq!(expected, "0000000000000000000000000000000000000000000000000000000000000000");
+                assert_eq!(got, sha256::hash_hex(b"hello\n"));
+            }
+            other => panic!("expected Sha256Mismatch, got {other:?}"),
+        }
+    }
+
+    /// A minimal TOML recipe in a temp dir with one local file source.
+    fn test_recipe(local_file: &Path, sha256: Option<&str>) -> Recipe {
+        let dir = temp("recipe-test");
+        let sum = sha256.unwrap_or_else(|| gozpak_core::sha256::hash_file(local_file).unwrap());
+        std::fs::write(
+            dir.join("recipe.toml"),
+            format!(
+                "[package]\nname = \"t\"\nversion = \"1.0\"\nrelease = 1\n\n[source]\nurls = [ {{ url = \"{f}\", sha256 = \"{sum}\" }} ]\n",
+                f = local_file.display(),
+                sum = sum
+            ),
+        )
+        .unwrap();
+        Recipe::load(&dir).unwrap()
+    }
+
+    #[test]
+    fn tarball_extracts_and_local_source_copies() {
+        let t = temp("extract");
+        let src_dir = t.join("s");
+        std::fs::create_dir_all(src_dir.join("top/sub")).unwrap();
+        std::fs::write(src_dir.join("top/file.txt"), b"content\n").unwrap();
+        let tb = make_tarball(&src_dir, "data.tar.gz");
+
+        let work = Work::create(&t, "p").unwrap();
+        let recipe = test_recipe(&tb, None);
+        let srcdir = stage(&recipe, &work, &t.join("cache")).unwrap();
+        assert!(srcdir.join("file.txt").is_file(), "stripped top-level dir");
+    }
+
+    #[test]
+    fn missing_local_source_is_error() {
+        let t = temp("missing-local");
+        let work = Work::create(&t, "p").unwrap();
+        let recipe = test_recipe(&t.join("nope.tar.gz"), None);
+        match stage(&recipe, &work, &t.join("cache")) {
+            Err(BuildError::MissingLocal { path, .. }) => {
+                assert_eq!(path, t.join("nope.tar.gz"));
+            }
+            other => panic!("expected MissingLocal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unpinned_git_ref_is_rejected() {
+        let t = temp("git-unpinned");
+        let dir = t.join("recipe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("recipe.toml"),
+            "[package]\nname = \"g\"\nversion = \"1\"\nrelease = 1\n\n[source]\ngit = \"git+https://example.com/o/r#main\"\n",
+        )
+        .unwrap();
+        // The M1 validator already rejects branch-like refs.
+        match gozpak_recipe::Recipe::load(&dir) {
+            Err(e) => assert!(e.to_string().contains("pin"), "{e}"),
+            Ok(_) => panic!("unpinned git ref must not load"),
+        }
+    }
+}

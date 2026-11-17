@@ -19,6 +19,7 @@ path = "src/main.rs"
 gozpak-core = { path = "../gozpak-core" }
 gozpak-recipe = { path = "../gozpak-recipe" }
 gozpak-repo = { path = "../gozpak-repo" }
+gozpak-build = { path = "../gozpak-build" }
 
 [dev-dependencies]
 gozpak-core = { path = "../gozpak-core" }

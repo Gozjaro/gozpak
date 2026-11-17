@@ -1,0 +1,21 @@
+[package]
+name = "gozpak-build"
+description = "gozpak (Rust rewrite, M2a): source staging, [build] execution, .gpkg (tar.zst) packaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gozpak-core = { path = "../gozpak-core" }
+gozpak-recipe = { path = "../gozpak-recipe" }
+gozpak-repo = { path = "../gozpak-repo" }
+# zstd compresses the `.gpkg` container (tar.zst). Pinned exactly, and with
+# default features off, to keep the dependency chain MSRV-safe (zstd 0.13.5
+# declares rust-version 1.64; its chain — zstd-safe/zstd-sys/cc — is older).
+zstd = { version = "=0.13.5", default-features = false }
+# `toml` + `serde` are already in the M1 workspace lock (gozpak-recipe uses
+# them for recipe.toml); they serialize `manifest.toml` inside the .gpkg.
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
