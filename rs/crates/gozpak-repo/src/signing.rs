@@ -22,9 +22,9 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 /// (or an override — see [`verify_with`] in the CLI layer).
 ///
 /// The matching private key is held only by the packaging host
-/// (7D12, `/home/weepingdogel/.secrets/gozjaro-repo.key`); it is never
-/// committed to any repository.
-pub const EMBEDDED_PUBKEY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// (7D12, `/home/weepingdogel/.secrets/gozjaro-repo.key`, 0600); it is
+/// never committed to any repository.
+pub const EMBEDDED_PUBKEY: &str = "b73bfc76a398ec3602313060a1bff3be7e61b06f0710d683d661aa1c9051f53e";
 
 /// One signature error.
 #[derive(Debug, Clone, PartialEq, Eq)]
