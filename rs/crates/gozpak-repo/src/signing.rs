@@ -24,7 +24,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 /// The matching private key is held only by the packaging host
 /// (7D12, `/home/weepingdogel/.secrets/gozjaro-repo.key`, 0600); it is
 /// never committed to any repository.
-pub const EMBEDDED_PUBKEY: &str = "d0637cdb34e84d6dbc781d5c0120b20faa15092abba77749e1fc55301309bb90";
+pub const EMBEDDED_PUBKEY: &str = "b73bfc76a398ec3602313060a1bff3be7e61b06f0710d683d661aa1c9051f53e";
 
 /// One signature error.
 #[derive(Debug, Clone, PartialEq, Eq)]
