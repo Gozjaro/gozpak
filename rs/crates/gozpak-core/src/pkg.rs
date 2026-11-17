@@ -55,6 +55,27 @@ pub struct DepReq {
 }
 
 impl DepReq {
+    /// Whether the candidate version meets this dependency's constraint.
+    pub fn satisfied_by(&self, candidate: &crate::version::VersionKey) -> bool {
+        use crate::version::{parse_evr, vercmp};
+        use std::cmp::Ordering;
+
+        let Some(op) = self.op else {
+            return true;
+        };
+        let Some(version) = self.version.as_deref() else {
+            return false;
+        };
+        let ordering = vercmp(candidate, &parse_evr(version));
+        match op {
+            Op::Eq => ordering == Ordering::Equal,
+            Op::Lt => ordering == Ordering::Less,
+            Op::Gt => ordering == Ordering::Greater,
+            Op::Le => ordering != Ordering::Greater,
+            Op::Ge => ordering != Ordering::Less,
+        }
+    }
+
     /// Parse a v1.1 constraint string (TOML `depends` entry).
     ///
     /// `build_only` marks the entry as coming from `build_depends`.
@@ -193,6 +214,37 @@ impl Pkg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_constraint_satisfaction() {
+        use crate::version::parse_evr;
+
+        for (requirement, candidate, expected) in [
+            ("zlib>=1.3", "1.3.1-1", true),
+            ("zlib>=1.3", "1.2.13-1", false),
+            ("zlib>=1.3", "1.3-5", true),
+            ("zlib<1.3", "1.2.13", true),
+            ("zlib<1.3", "1.3", false),
+            ("zlib=1.3-2", "1.3-2", true),
+            ("zlib=1.3-2", "1.3-1", false),
+            ("zlib=1.3", "1.3-7", true),
+            ("foo>=1:2.0", "0:9.9", false),
+            ("foo>=1:2.0", "1:2.0-1", true),
+            ("bar", "anything", true),
+            ("zlib>1.3", "1.3.1", true),
+            ("zlib>1.3", "1.3", false),
+            ("zlib<=1.3", "1.2.13", true),
+            ("zlib<=1.3", "1.3", true),
+            ("zlib<=1.3", "1.3.1", false),
+        ] {
+            let dependency = DepReq::parse_constraint(requirement, false).unwrap();
+            assert_eq!(
+                dependency.satisfied_by(&parse_evr(candidate)),
+                expected,
+                "{requirement} by {candidate}"
+            );
+        }
+    }
 
     #[test]
     fn parse_plain_dep() {

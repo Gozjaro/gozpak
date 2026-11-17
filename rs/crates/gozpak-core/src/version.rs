@@ -70,7 +70,7 @@ impl fmt::Display for VersionRel {
 // ---------------------------------------------------------------------------
 
 /// The three keys the solver and the repo index compare in order:
-/// epoch (numeric) → version (pacman chunk compare) → release (numeric).
+/// epoch (numeric) → version → release (pacman chunk comparisons).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct VersionKey {
     pub epoch: u64,
@@ -88,13 +88,25 @@ impl VersionKey {
     }
 }
 
-/// Pacman-style comparison of two versions.
-///
-/// `epoch` is compared numerically first; then the version core with
-/// pacman chunk rules (numeric chunks vs alphabetic chunks; a release
-/// tag such as `rc`/`a`/`b`/`alpha` sorts BELOW the plain release of
-/// that number, e.g. `3.5.1rc1 < 3.5.1`); finally the release number,
-/// numerically.
+/// Parse pacman's `epoch:version-release` form, splitting at the last `-`.
+pub fn parse_evr(s: &str) -> VersionKey {
+    let epoch_end = s.bytes().take_while(u8::is_ascii_digit).count();
+    let (epoch, remainder) = if s.as_bytes().get(epoch_end) == Some(&b':') {
+        let epoch = if epoch_end == 0 {
+            0
+        } else {
+            s[..epoch_end].parse::<u64>().unwrap_or(u64::MAX)
+        };
+        (epoch, &s[epoch_end + 1..])
+    } else {
+        (0, s)
+    };
+    let (version, release) = remainder.rsplit_once('-').unwrap_or((remainder, ""));
+    VersionKey::new(epoch, version, release)
+}
+
+/// Pacman-style comparison: numeric epoch, then version, then release.
+/// Release is compared only when both versions specify a non-empty release.
 pub fn vercmp(a: &VersionKey, b: &VersionKey) -> std::cmp::Ordering {
     let o = a.epoch.cmp(&b.epoch);
     if o != std::cmp::Ordering::Equal {
@@ -104,99 +116,168 @@ pub fn vercmp(a: &VersionKey, b: &VersionKey) -> std::cmp::Ordering {
     if o != std::cmp::Ordering::Equal {
         return o;
     }
-    release_cmp(&a.release, &b.release)
-}
-
-/// Numeric release compare with a string fallback for non-numeric values.
-fn release_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    match (a.parse::<u64>(), b.parse::<u64>()) {
-        (Ok(x), Ok(y)) => x.cmp(&y),
-        _ => a.cmp(b),
+    if !a.release.is_empty() && !b.release.is_empty() {
+        pkgver_cmp(&a.release, &b.release)
+    } else {
+        std::cmp::Ordering::Equal
     }
 }
 
-/// Pacman `pkgver` compare: alternating alphabetic / numeric blocks.
-///
-/// - Alphabetic runs compare byte-wise; when one side has an alphabetic
-///   run and the other side is at a digit or the end, the side WITH the
-///   letters is OLDER (release tags sort below the release).
-/// - Numeric runs compare numerically.
-/// - At the end, the side that ran out of blocks while the other still
-///   has a *numeric* remainder is older; a remaining alphabetic
-///   remainder makes the shorter side newer (covered by the alphabetic
-///   rule above).
+/// Pacman's `rpmvercmp`: compare separator lengths and numeric/ASCII alpha runs.
+/// Numeric runs are compared without conversion to a bounded integer.
 pub fn pkgver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let mut sa = a.as_bytes();
-    let mut sb = b.as_bytes();
-    loop {
-        // Leading non-digit run.
-        let (ta, na) = take_run(&mut sa, |c| !c.is_ascii_digit());
-        let (tb, nb) = take_run(&mut sb, |c| !c.is_ascii_digit());
-        match (ta.is_empty(), tb.is_empty()) {
-            (false, false) => {
-                let o = ta.cmp(tb);
-                if o != Ordering::Equal {
-                    return o;
-                }
-            }
-            (false, true) => return Ordering::Less,
-            (true, false) => return Ordering::Greater,
-            (true, true) => {}
-        }
-        sa = na;
-        sb = nb;
-        // Leading digit run.
-        let (da, na) = take_digits(sa);
-        let (db, nb) = take_digits(sb);
-        match (da.is_none(), db.is_none()) {
-            (false, false) => {
-                let o = da.unwrap().cmp(&db.unwrap());
-                if o != Ordering::Equal {
-                    return o;
-                }
-            }
-            (false, true) => return Ordering::Greater,
-            (true, false) => return Ordering::Less,
-            (true, true) => {}
-        }
-        sa = na;
-        sb = nb;
-        if sa.is_empty() && sb.is_empty() {
-            return Ordering::Equal;
-        }
-    }
-}
 
-fn take_run<'a>(
-    bytes: &mut &'a [u8],
-    pred: impl Fn(u8) -> bool,
-) -> (&'a [u8], &'a [u8]) {
-    let mut end = 0;
-    while end < bytes.len() && pred(bytes[end]) {
-        end += 1;
+    if a == b {
+        return Ordering::Equal;
     }
-    let run = &bytes[..end];
-    *bytes = &bytes[end..];
-    (run, *bytes)
-}
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let (start_a, start_b) = (i, j);
+        while i < a.len() && !a[i].is_ascii_alphanumeric() {
+            i += 1;
+        }
+        while j < b.len() && !b[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        if i == a.len() || j == b.len() {
+            break;
+        }
+        let ordering = (i - start_a).cmp(&(j - start_b));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
 
-/// Leading digit run as a (saturating) u64.
-fn take_digits<'a>(bytes: &'a [u8]) -> (Option<u64>, &'a [u8]) {
-    let mut n: u64 = 0;
-    let mut any = false;
-    let mut end = 0;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        n = n.saturating_mul(10).saturating_add(u64::from(bytes[end] - b'0'));
-        any = true;
-        end += 1;
+        let (mut start_a, mut start_b) = (i, j);
+        let isnum = a[i].is_ascii_digit();
+        if isnum {
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+        } else {
+            while i < a.len() && a[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+        }
+        if j == start_b {
+            return if isnum { Ordering::Greater } else { Ordering::Less };
+        }
+        if isnum {
+            while start_a < i && a[start_a] == b'0' {
+                start_a += 1;
+            }
+            while start_b < j && b[start_b] == b'0' {
+                start_b += 1;
+            }
+            let ordering = (i - start_a).cmp(&(j - start_b));
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        let ordering = a[start_a..i].cmp(&b[start_b..j]);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
     }
-    (any.then_some(n), &bytes[end..])
+
+    if i == a.len() && j == b.len() {
+        return Ordering::Equal;
+    }
+    if (i == a.len() && !b[j].is_ascii_alphabetic())
+        || (i < a.len() && a[i].is_ascii_alphabetic())
+    {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pacman_version_comparisons() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+
+        for (a, b, expected) in [
+            ("1.5.0", "1.5.0", Equal),
+            ("1.5.1", "1.5.0", Greater),
+            ("1.5.1", "1.5", Greater),
+            ("1.0", "1.0.1", Less),
+            ("3.5", "3.5.1", Less),
+            ("1.5.0-1", "1.5.0-2", Less),
+            ("1.5.0-1", "1.5.1-1", Less),
+            ("1.5.0-2", "1.5.1-1", Less),
+            ("1.5-1", "1.5", Equal),
+            ("1.1-1", "1.1", Equal),
+            ("1.0a", "1.0alpha", Less),
+            ("1.0alpha", "1.0b", Less),
+            ("1.0b", "1.0beta", Less),
+            ("1.0beta", "1.0rc", Less),
+            ("1.0rc", "1.0", Less),
+            ("3.5.1rc1", "3.5.1", Less),
+            ("1.5.a", "1.5", Greater),
+            ("1.5.b", "1.5.a", Greater),
+            ("1.5.1", "1.5.b", Greater),
+            ("1.0a", "1.0.1", Less),
+            ("2.0", "2_0", Equal),
+            ("2.0_a", "2_0.a", Equal),
+            ("2.0a", "2.0.a", Less),
+            ("2___a", "2_a", Greater),
+            ("1.01", "1.1", Equal),
+            ("1.9", "1.10", Less),
+            ("0:1.0", "0:1.0", Equal),
+            ("0:1.0", "0:1.1", Less),
+            ("1:1.0", "0:1.0", Greater),
+            ("1:1.0", "0:1.1", Greater),
+            ("1:1.0", "2:1.1", Less),
+            ("1:1.0", "0:1.0-1", Greater),
+            ("1:1.0-1", "0:1.1-1", Greater),
+            ("0:1.0", "1.0", Equal),
+            ("0:1.1", "1.0", Greater),
+            ("1:1.0", "1.0", Greater),
+            ("1.1", "1:1.1", Less),
+            ("99999999999999999999", "1", Greater),
+        ] {
+            assert_eq!(vercmp(&parse_evr(a), &parse_evr(b)), expected, "{a} vs {b}");
+            assert_eq!(
+                vercmp(&parse_evr(b), &parse_evr(a)),
+                expected.reverse(),
+                "{b} vs {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_epoch_version_release() {
+        for (input, epoch, version, release) in [
+            ("2:1.0-beta-3", 2, "1.0-beta", "3"),
+            ("001:1.0-", 1, "1.0", ""),
+            ("abc:1.0-2", 0, "abc:1.0", "2"),
+            ("1a:1.0-2", 0, "1a:1.0", "2"),
+            (":1.0", 0, "1.0", ""),
+            ("", 0, "", ""),
+        ] {
+            assert_eq!(parse_evr(input), VersionKey::new(epoch, version, release));
+        }
+    }
+
+    #[test]
+    fn numeric_runs_do_not_overflow_and_releases_use_chunk_rules() {
+        use std::cmp::Ordering::{Equal, Less};
+
+        assert_eq!(pkgver_cmp("99999999999999999998", "99999999999999999999"), Less);
+        assert_eq!(vercmp(&parse_evr("1-1.9"), &parse_evr("1-1.10")), Less);
+        assert_eq!(vercmp(&parse_evr("1-"), &parse_evr("1-2")), Equal);
+    }
 
     #[test]
     fn parse_version_release() {
