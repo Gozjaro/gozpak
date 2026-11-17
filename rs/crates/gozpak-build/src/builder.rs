@@ -6,6 +6,8 @@
 //! - `DESTDIR` — the staging prefix (all installs land under it),
 //! - `VERSION`/`RELEASE`/`EPOCH`/`MAJOR`/`MINOR`/`PATCH`/`IDENT`/
 //!   `PACKAGE` — the same values as `gozpak_recipe::subst::Subst`,
+//! - `RECIPE_DIR` — the recipe's own directory (build steps run in the
+//!   unpacked source tree; recipe-local files are `$RECIPE_DIR/...`),
 //! - `JOBS` — `std::thread::available_parallelism()`.
 //!
 //! Build systems:
@@ -239,5 +241,10 @@ pub fn build_env(recipe: &Recipe, work: &Work) -> Vec<(&'static str, String)> {
         ("IDENT", subst.ident.clone()),
         ("PACKAGE", subst.package.clone()),
         ("JOBS", jobs()),
+        // The recipe directory: build steps run with cwd = the unpacked
+        // source tree, so recipe-local files (kernels' configs/, vendored
+        // snippets) are reached via $RECIPE_DIR, never by bare relative
+        // path.
+        ("RECIPE_DIR", recipe.dir.to_string_lossy().into_owned()),
     ]
 }
