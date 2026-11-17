@@ -37,6 +37,11 @@ urls = [
     { url = "https://www.openssl.org/source/openssl-$VERSION.tar.xz",
       sha256 = "..." },
 ]
+# archives (tar.xz/tar.gz/tgz/tar.bz2/tbz2/tar) are unpacked (top-level dir
+# stripped); any other file (a prebuilt binary, a patch used directly) is
+# placed in the source directory as-is under its file name, so `raw`
+# build steps can reference it by that name:
+# urls = [ { url = "https://…/gozpak-x86_64", sha256 = "…" } ]
 # OR a git source — pinned ref is MANDATORY (commit hash or tag, no branches):
 # git = "git+https://github.com/org/repo#d41d8cd9"
 patches = ["patches/fix-build.patch"]   # applied in order, relative to recipe dir

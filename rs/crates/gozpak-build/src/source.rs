@@ -131,6 +131,20 @@ pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, Buil
                             ],
                             &[],
                         )?;
+                    } else {
+                        // Non-archive file source (a prebuilt binary, a
+                        // patch used directly, …): place it in the source
+                        // directory under its file name so `raw` build
+                        // steps can reference it by that name.
+                        let target = work.extract.join(
+                            file.file_name().ok_or_else(|| {
+                                BuildError::Io(std::io::Error::other(format!(
+                                    "non-UTF8 name: {}",
+                                    file.display()
+                                )))
+                            })?,
+                        );
+                        std::fs::copy(&file, &target)?;
                     }
                     has_files = true;
                 }
@@ -427,6 +441,23 @@ mod tests {
         let work = Work::create(&t, "p").unwrap();
         let srcdir = stage(&recipe, &work, &t.join("cache")).unwrap();
         assert!(srcdir.join("file.txt").is_file(), "top-level dir stripped");
+    }
+
+    #[test]
+    fn non_archive_file_source_lands_in_extract() {
+        let t = temp("plain-file");
+        let file = t.join("tool.bin");
+        std::fs::write(&file, b"\x7fELF-fake-binary").unwrap();
+        let dir = t.join("recipe");
+        let recipe = test_recipe(&dir, &file, None);
+        let work = Work::create(&t, "p").unwrap();
+        let srcdir = stage(&recipe, &work, &t.join("cache")).unwrap();
+        let staged = srcdir.join("tool.bin");
+        assert!(staged.is_file(), "plain file kept as-is in the source dir");
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            b"\x7fELF-fake-binary"
+        );
     }
 
     #[test]
