@@ -8,7 +8,10 @@
 //!   `PACKAGE` — the same values as `gozpak_recipe::subst::Subst`,
 //! - `RECIPE_DIR` — the recipe's own directory (build steps run in the
 //!   unpacked source tree; recipe-local files are `$RECIPE_DIR/...`),
-//! - `JOBS` — `std::thread::available_parallelism()`.
+//! - `JOBS` — `std::thread::available_parallelism()`,
+//! - `CFLAGS`/`CPPFLAGS`/`LDFLAGS` — LFS-standard defaults
+//!   (`-march=x86-64 -O2 -pipe` / empty / empty) unless the host
+//!   environment sets them; recipes may reference these under `set -u`.
 //!
 //! Build systems:
 //!
@@ -246,5 +249,15 @@ pub fn build_env(recipe: &Recipe, work: &Work) -> Vec<(&'static str, String)> {
         // snippets) are reached via $RECIPE_DIR, never by bare relative
         // path.
         ("RECIPE_DIR", recipe.dir.to_string_lossy().into_owned()),
+        // LFS contract: recipes (esp. PKGBUILD-converted extra batch)
+        // reference $CFLAGS/$CPPFLAGS/$LDFLAGS under `sh -eu`, so an
+        // unset variable is a hard failure. Export the LFS-standard
+        // triplet; host-set values win over the defaults.
+        (
+            "CFLAGS",
+            std::env::var("CFLAGS").unwrap_or_else(|_| "-march=x86-64 -O2 -pipe".into()),
+        ),
+        ("CPPFLAGS", std::env::var("CPPFLAGS").unwrap_or_default()),
+        ("LDFLAGS", std::env::var("LDFLAGS").unwrap_or_default()),
     ]
 }

@@ -57,10 +57,14 @@ system = "autotools"          # "raw" | "autotools" | "meson" | "cmake" | "make"
 # system = "raw": steps is ONE shell script — a single `sh -eu` process,
 #   working dir = unpacked source tree. cd/export/variables PERSIST across
 #   lines. The staging prefix is provided as the `DESTDIR` ENV VAR (plus
-#   `JOBS` and the subst names VERSION/EPOCH/...); NO positional args are
-#   passed. Legacy LFS `build` files used positional `$1` — migrated recipes
-#   rewrite it as `$DESTDIR` (mechanical, one sed); the builder does not
-#   re-introduce the positional convention.
+#   `JOBS`, `RECIPE_DIR` = the recipe's own directory, and the subst names
+#   VERSION/EPOCH/...); NO positional args are passed. `CFLAGS`/`CPPFLAGS`/
+#   `LDFLAGS` are always exported (LFS-standard defaults
+#   `-march=x86-64 -O2 -pipe` / empty / empty, host env wins), so recipes
+#   may reference them under `set -u`. Legacy LFS `build` files used
+#   positional `$1` — migrated recipes rewrite it as `$DESTDIR`
+#   (mechanical, one sed); the builder does not re-introduce the
+#   positional convention.
 steps = [
     "./configure --prefix=/usr --shared",
     "make -j$JOBS",
