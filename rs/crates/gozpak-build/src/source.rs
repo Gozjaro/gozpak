@@ -164,13 +164,21 @@ pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, Buil
                 if git_dir.exists() {
                     std::fs::remove_dir_all(&git_dir)?;
                 }
-                proc::run(
+                // Dumb-http hosts (pagure, gitea, older gitlab) reject
+                // `git clone --depth 1`; fall back to a full clone, where
+                // pinned tags/commits are already local refs.
+                if proc::run(
                     pkg,
                     &work.extract,
                     "git",
                     &["clone", "--depth", "1", repo, name],
                     &[],
-                )?;
+                )
+                .is_err()
+                {
+                    let _ = std::fs::remove_dir_all(&git_dir);
+                    proc::run(pkg, &work.extract, "git", &["clone", repo, name], &[])?;
+                }
                 // A pinned commit/tag is only in a depth-1 clone when it
                 // is the remote's default HEAD; fetch it explicitly if not.
                 // A tag fetched without a refspec lands only in FETCH_HEAD,
