@@ -224,9 +224,16 @@ pub fn jobs() -> String {
 }
 
 /// The build-stage environment for one recipe: the DESTDIR staging
-/// prefix, the subst table values (the same names the v1.2
-/// substitution table uses, so build steps can use `$DESTDIR` /
-/// `$VERSION` ...), and JOBS.
+/// prefix, the version identity (`$VERSION` / `$RELEASE` / `$EPOCH` /
+/// `$IDENT` / `$PACKAGE`), and JOBS.
+///
+/// The v1.2 subst table also defines MAJOR/MINOR/PATCH components, but
+/// those are substituted by the recipe parser (URLs etc.) and are NOT
+/// exported to build-step shells: `PATCH` collides with the gnulib /
+/// autotools tool-override env vars that bootstrap scripts read
+/// (`find_tool patch` honors `$PATCH`), which breaks any recipe whose
+/// source tree runs a gnulib bootstrap. Steps needing a version
+/// component can derive it from `$VERSION`.
 pub fn build_env(recipe: &Recipe, work: &Work) -> Vec<(&'static str, String)> {
     let subst = Subst::from_recipe(&recipe.name, &recipe.version, recipe.epoch);
     // Deterministic build PATH: LFS build tools land in /usr/local/bin
@@ -238,9 +245,6 @@ pub fn build_env(recipe: &Recipe, work: &Work) -> Vec<(&'static str, String)> {
         ("VERSION", subst.version.clone()),
         ("RELEASE", subst.release.clone()),
         ("EPOCH", subst.epoch.to_string()),
-        ("MAJOR", subst.major.clone()),
-        ("MINOR", subst.minor.clone()),
-        ("PATCH", subst.patch.clone()),
         ("IDENT", subst.ident.clone()),
         ("PACKAGE", subst.package.clone()),
         ("JOBS", jobs()),
