@@ -458,14 +458,18 @@ fn resolve_closure(
     let mut indeg: BTreeMap<String, usize> = names
         .iter()
         .map(|n| {
+            // Count DISTINCT provider packages, not dependency lines: one
+            // provider satisfying two deps (e.g. a meta-package providing
+            // glibc and gmp) must decrement only once when it is placed.
             let k = tx
                 .get(n)
                 .unwrap()
                 .depends
                 .iter()
                 .filter_map(|d| gozpak_core::DepReq::parse_constraint(d, false).ok())
-                .filter(|r| provider(&r.name).is_some())
-                .count();
+                .filter_map(|r| provider(&r.name))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
             (n.clone(), k)
         })
         .collect();
@@ -902,6 +906,37 @@ mod tests {
         let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
         let zlib = tx.iter().find(|e| e.name == "zlib").unwrap();
         assert_eq!(zlib.version, "1.3.1");
+    }
+
+    /// Regression: the real gnutls chain. gnutls -> nettle (which needs
+    /// glibc + gmp; glibc is provided by the gozjaro-base meta-package)
+    /// plus p11-kit -> libffi and zlib. Must place all eight, no cycle.
+    #[test]
+    fn closure_real_gnutls_chain_no_false_cycle() {
+        let mut base = entry("gozjaro-base", "26.11", 1, &[]);
+        base.provides = vec!["glibc".into(), "gmp".into()];
+        let entries = vec![
+            entry("gnutls", "3.8.13", 1, &["nettle", "libtasn1", "p11-kit", "zlib"]),
+            entry("nettle", "3.10", 1, &["glibc", "gmp"]),
+            entry("libtasn1", "4.20", 1, &[]),
+            entry("p11-kit", "0.25.6", 1, &["libffi"]),
+            entry("zlib", "1.3.1", 1, &[]),
+            entry("libffi", "3.5", 1, &[]),
+            base,
+        ];
+        let installed: gozpak_install::InstalledList = Vec::new();
+        let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
+        let ns = names(&tx);
+        assert_eq!(ns.len(), 7, "closure: {ns:?}");
+        // every dependency must appear before its dependent
+        let pos = |n: &str| ns.iter().position(|x| x == n).unwrap();
+        assert!(pos("libffi") < pos("p11-kit"));
+        assert!(pos("zlib") < pos("gnutls"));
+        assert!(pos("libtasn1") < pos("gnutls"));
+        assert!(pos("p11-kit") < pos("gnutls"));
+        assert!(pos("nettle") < pos("gnutls"));
+        assert!(pos("gozjaro-base") < pos("nettle"));
+        assert!(ns.contains(&"gmp".to_string()) || ns.contains(&"gozjaro-base".to_string()));
     }
 
     /// A requested name and one of its own dependencies: the dependency

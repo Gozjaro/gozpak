@@ -122,6 +122,14 @@ pub fn unpack_gpkg(gpkg: &Path, tmp: &Path) -> Result<Staged, InstallError> {
     }
     let _ = std::fs::remove_file(&tarball);
 
+    // File-less meta-package: no `rootfs/` entry in the tar. Normalize to an
+    // empty tree so verify_staged runs against a consistent empty tree
+    // (the packer stamped the empty-tree hash into the manifest).
+    let rootfs = dir.join("rootfs");
+    if !rootfs.exists() {
+        std::fs::create_dir_all(&rootfs).map_err(InstallError::Io)?;
+    }
+
     let manifest_text = std::fs::read_to_string(dir.join("manifest.toml"))
         .map_err(|e| err(format!("no manifest.toml: {e}")))?;
     let manifest: Manifest =
