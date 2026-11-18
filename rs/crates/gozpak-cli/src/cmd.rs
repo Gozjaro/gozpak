@@ -359,6 +359,150 @@ fn resolve_wanted(
     out
 }
 
+/// M2-GET: recursive dependency closure for one install transaction.
+///
+/// `resolve_wanted` only looks at the requested names; this walks the
+/// closure: every `depends` entry of every transaction member that the
+/// transaction and the installed DB do not already satisfy is resolved
+/// to the highest index candidate (by name, or via any package's
+/// `provides`) and added, until fixpoint. The result is in topological
+/// order — dependencies before dependents — so the transaction unpacks
+/// and registers bottom-up. A dependency that no index entry provides
+/// dies with a clear message; an unparseable constraint dies the same
+/// way instead of surfacing at the final gate.
+fn resolve_closure(
+    seed: Vec<gozpak_repo::BinaryEntry>,
+    entries: &[gozpak_repo::BinaryEntry],
+    installed: &gozpak_install::InstalledList,
+) -> Vec<gozpak_repo::BinaryEntry> {
+    use std::collections::BTreeMap;
+
+    let mut tx: BTreeMap<String, gozpak_repo::BinaryEntry> = seed
+        .iter()
+        .map(|e| (e.name.clone(), e.clone()))
+        .collect();
+
+    let installed_names: std::collections::BTreeSet<&str> =
+        installed.iter().map(|(n, _)| n.as_str()).collect();
+
+    loop {
+        // Everything this transaction will provide: names + provides.
+        let tx_provides: std::collections::BTreeSet<String> = tx
+            .values()
+            .flat_map(|e| std::iter::once(e.name.clone()).chain(e.provides.iter().cloned()))
+            .collect();
+
+        let members: Vec<gozpak_repo::BinaryEntry> = tx.values().cloned().collect();
+        let mut added = 0usize;
+        for e in &members {
+            for dep in &e.depends {
+                let req = match gozpak_core::DepReq::parse_constraint(dep, false) {
+                    Ok(r) => r,
+                    Err(err) => die(&e.name, &format!("bad dependency {dep} ({err})")),
+                };
+                if tx_provides.contains(&req.name) {
+                    continue;
+                }
+                if installed_names.contains(req.name.as_str()) {
+                    let ok = installed
+                        .iter()
+                        .any(|(n, v)| {
+                            n == &req.name
+                                && req.satisfied_by(&gozpak_core::VersionKey::new(
+                                    0,
+                                    v.version.clone(),
+                                    v.release.clone(),
+                                ))
+                        });
+                    if ok {
+                        continue;
+                    }
+                }
+                // Pull the highest index candidate that provides this dep.
+                let cand = entries
+                    .iter()
+                    .filter(|c| c.name == req.name || c.provides.iter().any(|p| p == &req.name))
+                    .max_by(|a, b| {
+                        gozpak_core::pkgver_cmp(
+                            &format!("{}:{}-{}", a.epoch, a.version, a.release),
+                            &format!("{}:{}-{}", b.epoch, b.version, b.release),
+                        )
+                    });
+                match cand {
+                    Some(c) if !tx.contains_key(&c.name) => {
+                        tx.insert(c.name.clone(), c.clone());
+                        added += 1;
+                    }
+                    Some(_) => {}
+                    None => die(
+                        &e.name,
+                        &format!("dependency '{dep}' is not in any synced repository"),
+                    ),
+                }
+            }
+        }
+        if added == 0 {
+            break;
+        }
+    }
+
+    // Topological order (Kahn): place a package after the closure member
+    // that satisfies each of its dependencies — by name or via `provides`.
+    let names: Vec<String> = tx.keys().cloned().collect();
+    let provider = |d: &str| -> Option<&String> {
+        names.iter().find(|nm| {
+            let nm: &String = *nm;
+            nm.as_str() == d || tx[nm.as_str()].provides.iter().any(|p| p == d)
+        })
+    };
+    let mut indeg: BTreeMap<String, usize> = names
+        .iter()
+        .map(|n| {
+            let k = tx
+                .get(n)
+                .unwrap()
+                .depends
+                .iter()
+                .filter_map(|d| gozpak_core::DepReq::parse_constraint(d, false).ok())
+                .filter(|r| provider(&r.name).is_some())
+                .count();
+            (n.clone(), k)
+        })
+        .collect();
+    let mut queue: Vec<String> = names
+        .iter()
+        .filter(|n| indeg.get(*n) == Some(&0))
+        .cloned()
+        .collect();
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    while let Some(n) = queue.pop() {
+        out.push(n.clone());
+        for m in &names {
+            let dec = tx
+                .get(m)
+                .unwrap()
+                .depends
+                .iter()
+                .filter_map(|d| gozpak_core::DepReq::parse_constraint(d, false).ok())
+                .any(|r| provider(&r.name) == Some(&n));
+            if dec {
+                let d = indeg.get_mut(m).unwrap();
+                if *d > 0 {
+                    *d -= 1;
+                }
+                if *d == 0 {
+                    queue.push(m.clone());
+                }
+            }
+        }
+    }
+    if out.len() != names.len() {
+        let stuck: Vec<String> = names.iter().filter(|n| !out.contains(n)).cloned().collect();
+        die("gozpak", &format!("dependency cycle among: {}", stuck.join(", ")));
+    }
+    out.into_iter().map(|n| tx.remove(&n).unwrap()).collect()
+}
+
 /// Locate one entry's `.gpkg`: full-URL entries download through the
 /// asset channel; bare-filename entries are read from the synced local
 /// (relay) repo. Either way the result lands in the bin cache with its
@@ -425,11 +569,15 @@ pub fn install(ctx: &Ctx, names: &[String]) -> i32 {
     }
     let wanted = resolve_wanted(names, &entries);
 
-    // Dependency gate BEFORE touching the system.
+    // Dependency closure BEFORE touching the system: every missing
+    // transitive dependency is pulled into the transaction and ordered
+    // before its dependents (topological), so one transaction installs
+    // the full closure bottom-up.
     let db = &ctx.db;
     let installed = installed_list(db);
-    if let Err(e) = check_deps(&wanted, &installed) {
-        die(&wanted[0].name, &e.to_string());
+    let tx = resolve_closure(wanted, &entries, &installed);
+    if let Err(e) = check_deps(&tx, &installed) {
+        die(&tx[0].name, &e.to_string());
     }
 
     let tmp = proc_root();
@@ -437,9 +585,9 @@ pub fn install(ctx: &Ctx, names: &[String]) -> i32 {
     let staging = tmp.join(format!("install-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&staging);
 
-    // 1+3: locate, unpack, verify.
+    // 1+3: locate, unpack, verify — in topological order (deps first).
     let mut staged = Vec::new();
-    for e in &wanted {
+    for e in &tx {
         let pkg = ensure_pkg(ctx, e);
         let s =
             unpack_gpkg(&pkg, &staging).unwrap_or_else(|err| die(&e.name, &err.to_string()));
@@ -675,5 +823,101 @@ fn run_checksum(recipe: &Recipe, _ctx: &Ctx) {
                 "checksums for source URLs belong in [source].urls[].sha256",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gozpak_core::VersionRel;
+
+    fn entry(name: &str, version: &str, release: u32, depends: &[&str]) -> gozpak_repo::BinaryEntry {
+        gozpak_repo::BinaryEntry {
+            name: name.into(),
+            version: version.into(),
+            release,
+            epoch: 0,
+            arch: "x86_64".into(),
+            sha256: "x".into(),
+            size: 0,
+            url: name.to_string(),
+            depends: depends.iter().map(|s| s.to_string()).collect(),
+            provides: Vec::new(),
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
+        }
+    }
+
+    fn names(v: &[gozpak_repo::BinaryEntry]) -> Vec<String> {
+        v.iter().map(|e| e.name.clone()).collect()
+    }
+
+    /// a → b → c: the closure pulls c and b in and orders them before a.
+    #[test]
+    fn closure_pulls_transitive_deps_in_topo_order() {
+        let entries = vec![
+            entry("a", "1.0", 1, &["b"]),
+            entry("b", "1.0", 1, &["c"]),
+            entry("c", "1.0", 1, &[]),
+        ];
+        let installed: gozpak_install::InstalledList = Vec::new();
+        let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
+        assert_eq!(names(&tx), vec!["c", "b", "a"]);
+    }
+
+    /// A dependency already in the installed DB is not re-pulled.
+    #[test]
+    fn closure_skips_installed_deps() {
+        let entries = vec![
+            entry("a", "1.0", 1, &["b"]),
+            entry("b", "1.0", 1, &[]),
+        ];
+        let installed = vec![("b".into(), VersionRel::new("1.0", "1"))];
+        let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
+        assert_eq!(names(&tx), vec!["a"]);
+    }
+
+    /// A dependency that no package has as its own name is matched via
+    /// `provides`.
+    #[test]
+    fn closure_matches_provides() {
+        let mut p = entry("p", "1.0", 1, &[]);
+        p.provides = vec!["libfoo".into()];
+        let entries = vec![entry("a", "1.0", 1, &["libfoo"]), p];
+        let installed: gozpak_install::InstalledList = Vec::new();
+        let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
+        assert_eq!(names(&tx), vec!["p", "a"]);
+    }
+
+    /// Highest index version wins; version constraints are honored by
+    /// picking the newest candidate that the final gate can verify.
+    #[test]
+    fn closure_picks_highest_version() {
+        let entries = vec![
+            entry("a", "1.0", 1, &["zlib>=1.3"]),
+            entry("zlib", "1.2.0", 1, &[]),
+            entry("zlib", "1.3.1", 2, &[]),
+        ];
+        let installed: gozpak_install::InstalledList = Vec::new();
+        let tx = resolve_closure(vec![entries[0].clone()], &entries, &installed);
+        let zlib = tx.iter().find(|e| e.name == "zlib").unwrap();
+        assert_eq!(zlib.version, "1.3.1");
+    }
+
+    /// A requested name and one of its own dependencies: the dependency
+    /// is not duplicated into the transaction.
+    #[test]
+    fn closure_no_duplicate_when_requested_and_dep() {
+        let entries = vec![
+            entry("a", "1.0", 1, &["b"]),
+            entry("b", "1.0", 1, &[]),
+        ];
+        let installed: gozpak_install::InstalledList = Vec::new();
+        let tx = resolve_closure(
+            vec![entries[0].clone(), entries[1].clone()],
+            &entries,
+            &installed,
+        );
+        assert_eq!(names(&tx), vec!["b", "a"]);
     }
 }
