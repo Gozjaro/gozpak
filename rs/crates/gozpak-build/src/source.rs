@@ -164,44 +164,94 @@ pub fn stage(recipe: &Recipe, work: &Work, cache: &Path) -> Result<PathBuf, Buil
                 if git_dir.exists() {
                     std::fs::remove_dir_all(&git_dir)?;
                 }
-                // Dumb-http hosts (pagure, gitea, older gitlab) reject
-                // `git clone --depth 1`; fall back to a full clone, where
-                // pinned tags/commits are already local refs.
-                if proc::run(
-                    pkg,
-                    &work.extract,
-                    "git",
-                    &["clone", "--depth", "1", repo, name],
-                    &[],
-                )
-                .is_err()
-                {
-                    let _ = std::fs::remove_dir_all(&git_dir);
-                    proc::run(pkg, &work.extract, "git", &["clone", repo, name], &[])?;
-                }
-                // A pinned commit/tag is only in a depth-1 clone when it
-                // is the remote's default HEAD; fetch it explicitly if not.
-                // A tag fetched without a refspec lands only in FETCH_HEAD,
-                // so map it into the local refs/tags namespace explicitly.
-                if proc::run(pkg, &git_dir, "git", &["checkout", pin], &[]).is_err() {
-                    let tag_fetch: &[&str] = &[
-                        "fetch",
-                        "--depth",
-                        "1",
-                        "origin",
-                        &format!("refs/tags/{pin}:refs/tags/{pin}"),
-                    ];
-                    if proc::run(pkg, &git_dir, "git", tag_fetch, &[]).is_err() {
-                        // Not a tag name (branch / commit): fetch it directly.
-                        proc::run(
-                            pkg,
-                            &git_dir,
-                            "git",
-                            &["fetch", "--depth", "1", "origin", pin],
-                            &[],
-                        )?;
-                    }
+                // Git-source cache: when a clone under the source cache
+                // already holds the pinned ref, build from a local clone
+                // of it (no network) -- hermetic for chrooted builds,
+                // where the proxy path to the remote is flaky.
+                let cache_git = cache_path_for(pkg, cache, repo, None);
+                let cache_has_pin = cache_git.is_dir()
+                    && proc::run(
+                        pkg,
+                        &cache_git,
+                        "git",
+                        &[
+                            "rev-parse",
+                            "--verify",
+                            "--quiet",
+                            &format!("{}^{{commit}}", pin),
+                        ],
+                        &[],
+                    )
+                    .is_ok();
+                if cache_has_pin {
+                    // A full local clone is fast and carries history, so
+                    // the pin is reachable even when it is not the cache
+                    // HEAD.
+                    proc::run(
+                        pkg,
+                        &work.extract,
+                        "git",
+                        &["clone", cache_git.to_str().unwrap(), name],
+                        &[],
+                    )?;
                     proc::run(pkg, &git_dir, "git", &["checkout", pin], &[])?;
+                } else {
+                    // Dumb-http hosts (pagure, gitea, older gitlab) reject
+                    // ; fall back to a full clone, where
+                    // pinned tags/commits are already local refs.
+                    if proc::run(
+                        pkg,
+                        &work.extract,
+                        "git",
+                        &["clone", "--depth", "1", repo, name],
+                        &[],
+                    )
+                    .is_err()
+                    {
+                        let _ = std::fs::remove_dir_all(&git_dir);
+                        proc::run(pkg, &work.extract, "git", &["clone", repo, name], &[])?;
+                    }
+                    // A pinned commit/tag is only in a depth-1 clone when it
+                    // is the remote default HEAD; fetch it explicitly if not.
+                    // A tag fetched without a refspec lands only in FETCH_HEAD,
+                    // so map it into the local refs/tags namespace explicitly.
+                    if proc::run(pkg, &git_dir, "git", &["checkout", pin], &[]).is_err() {
+                        let tag_fetch: &[&str] = &[
+                            "fetch",
+                            "--depth",
+                            "1",
+                            "origin",
+                            &format!("refs/tags/{pin}:refs/tags/{pin}"),
+                        ];
+                        if proc::run(pkg, &git_dir, "git", tag_fetch, &[]).is_err() {
+                            // Not a tag name (branch / commit): fetch it directly.
+                            proc::run(
+                                pkg,
+                                &git_dir,
+                                "git",
+                                &["fetch", "--depth", "1", "origin", pin],
+                                &[],
+                            )?;
+                        }
+                        proc::run(pkg, &git_dir, "git", &["checkout", pin], &[])?;
+                    }
+                    // Backfill the cache so the next build is hermetic.
+                    if !cache_git.exists() {
+                        if let Some(parent) = cache_git.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                            let _ = proc::run(
+                                pkg,
+                                &work.extract,
+                                "cp",
+                                &[
+                                    "-a",
+                                    git_dir.to_str().unwrap(),
+                                    cache_git.to_str().unwrap(),
+                                ],
+                                &[],
+                            );
+                        }
+                    }
                 }
                 git_dirs.push(git_dir);
             }
