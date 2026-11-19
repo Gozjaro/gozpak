@@ -103,7 +103,7 @@ impl Source {
 ///
 /// `hook` is always a registry name (registry: ldconfig,
 /// update-mime-database, gdk-pixbuf-query-loaders, desktop-database,
-/// fontconfig, shared-mime-info); `match_filter` is the optional path
+/// fontconfig, shared-mime-info, grub-mkconfig); `match_filter` is the optional path
 /// glob (used from M2 on; carried in M1).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookSpec {
@@ -126,13 +126,14 @@ pub enum HookEntry {
 }
 
 /// The hook names the installer knows (v1.1 registry).
-pub const HOOK_REGISTRY: [&str; 6] = [
+pub const HOOK_REGISTRY: [&str; 7] = [
     "ldconfig",
     "update-mime-database",
     "gdk-pixbuf-query-loaders",
     "desktop-database",
     "fontconfig",
     "shared-mime-info",
+    "grub-mkconfig",
 ];
 
 /// A parsed recipe (unified across both on-disk formats).
