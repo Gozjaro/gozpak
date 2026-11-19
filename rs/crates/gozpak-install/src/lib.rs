@@ -382,6 +382,7 @@ pub fn hook_command(name: &str) -> Option<&'static str> {
         "desktop-database" => "desktop-file-update",
         "fontconfig" => "fc-cache",
         "shared-mime-info" => "update-mime-database",
+        "grub-mkconfig" => "grub-mkconfig",
         _ => return None,
     })
 }
@@ -750,6 +751,19 @@ rootfs_sha256 = ""
         // ldconfig declared twice → planned once; fontconfig once.
         let names: Vec<_> = hooks.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, vec!["fontconfig", "ldconfig"]);
+
+        // grub-mkconfig is a registry hook (linux-kernel packages declare it).
+        let m3 = manifest_with_hooks(
+            "c",
+            vec![toml::Value::String("grub-mkconfig".into())],
+        );
+        let c_files: Vec<String> = vec!["boot/vmlinuz".into()];
+        let hooks3 = transaction_hooks(&[(m3.clone(), &c_files)]);
+        assert_eq!(
+            hooks3.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            vec!["grub-mkconfig"]
+        );
+        assert!(hook_command("grub-mkconfig").is_some());
     }
 
     #[test]
