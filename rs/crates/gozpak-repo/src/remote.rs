@@ -214,6 +214,21 @@ pub fn fetch_from(base: &RepoBase, file: &str, dest: &Path) -> Result<(), Remote
             std::fs::copy(&src, dest).map(|_| ()).map_err(RemoteError::Io)?;
         }
         RepoBase::Download { url, .. } => {
+            // A `file://` (or bare-path) "download" base is local: copy from
+            // the filesystem instead of shelling out to curl, which the
+            // install target's chroot may not have (offline acceptance).
+            if url.starts_with("file://") || url.starts_with('/') {
+                let dir = PathBuf::from(url.trim_start_matches("file://"));
+                let src = dir.join(file);
+                if !src.is_file() {
+                    return Err(RemoteError::Fetch {
+                        url: src.display().to_string(),
+                        detail: "file not in local repo directory".into(),
+                    });
+                }
+                std::fs::copy(&src, dest).map(|_| ()).map_err(RemoteError::Io)?;
+                return Ok(());
+            }
             let dest_arg = dest.display().to_string();
             let url_arg = format!("{url}/{file}");
             run_curl(&["-fsSL", "--max-time", "300", &url_arg, "-o", &dest_arg])?;
@@ -444,6 +459,27 @@ mod tests {
                 tag: "stable".into(),
             }
         );
+    }
+
+    #[test]
+    fn fetch_from_file_url_copies_locally_without_curl() {
+        let tmp = std::env::temp_dir().join("gozpak-fileurl-test");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("pkg-1-1.gpkg"), b"payload").unwrap();
+        let dest_dir = tmp.join("bin");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let base = RepoBase::Download {
+            url: format!("file://{}", repo.display()),
+            tag: String::new(),
+        };
+        fetch_from(&base, "pkg-1-1.gpkg", &dest_dir.join("pkg-1-1.gpkg"))
+            .expect("file:// base must copy from the local repo dir");
+        assert_eq!(
+            std::fs::read(dest_dir.join("pkg-1-1.gpkg")).unwrap(),
+            b"payload"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
