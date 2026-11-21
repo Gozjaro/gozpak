@@ -2,165 +2,165 @@
 
 The package manager for [Gozjaro Linux](https://github.com/Gozjaro).
 
-Forked from [KISS](https://kisslinux.github.io) by Dylan Araps. Rewritten and
-extended with online repositories, AI-assisted recipe generation, and batch
-build tooling.
+gozpak started as a fork of [KISS](https://kisslinux.github.io) by Dylan Araps
+(a single POSIX shell script). It is now being **rewritten in Rust** in
+[`rs/`](rs/), with a single-file `recipe.toml` format, `.gpkg` binary
+packages and ed25519-signed repositories.
+
+> **Status:** the Rust version is the active one and is **work in progress**
+> (milestone M2b). The shell script `./gozpak` (v6.0.0) is **deprecated** and
+> kept only for reference — see [Legacy shell version](#legacy-shell-version).
 
 ## Features
 
-- **Source builds** — build packages from source using simple 3-file recipes (`build`, `depends`, `version`)
-- **Binary repos** — fetch and install pre-built packages from remote mirrors (`gozpak sync && gozpak get`)
-- **AI integration** — auto-generate recipes, diagnose build failures, check upstream versions
-- **Batch build** — tools for maintainers to build, index, and publish package repositories
-- **Extended recipes** — optional `meta` file for post-install triggers (ldconfig, depmod, font cache, etc.)
-- **Alternatives system** — handle file conflicts between packages gracefully
-- **POSIX shell** — single-file package manager, ~2200 lines, no dependencies beyond a C compiler and coreutils
+- **Rust, small dependency set** — `gozpak-core` has no external
+  dependencies (SHA-256 is in-tree); the rest use a few pinned crates
+  (`toml`/`serde`, `serde_json`, `zstd`, `ed25519-dalek`)
+- **`recipe.toml`** — one TOML file per package: metadata, sources (tarballs,
+  pinned git refs, patches), build system (`raw`, `autotools`, `meson`,
+  `cmake`, `make`), install hooks and config backups
+- **`.gpkg` packages** — `tar.zst` container with a `manifest.toml` and the
+  `rootfs/` tree; the tree hash is verified before anything touches the system
+- **Signed binary repos** — `index.json` + `index.json.sig` (ed25519), verified
+  on every `sync`
+- **Dependency resolution** — `install`/`get` pull in the full dependency
+  closure (including `provides`) and install it in topological order, with
+  version constraints (`zlib>=1.3`) and epoch-aware version comparison
+- **Install transactions** — dependency and conflict checks, config-file
+  backups, and post-install hooks (run once per transaction)
+
+## Building
+
+Requires Rust 1.85 or newer.
+
+```sh
+cd rs
+cargo build --release     # → rs/target/release/gozpak
+cargo test                # unit + integration tests for all crates
+
+install -Dm755 target/release/gozpak /usr/bin/gozpak
+```
 
 ## Quick start
 
-```sh
-# Install gozpak
-install -Dm755 gozpak /usr/bin/gozpak
+### Install packages from a repository
 
-# Install extensions (optional)
-for f in contrib/gozpak-*; do install -Dm755 "$f" "/usr/bin/$(basename "$f")"; done
+```sh
+# Configure a repository (one URL per line, '#' comments)
+echo 'https://repo.example.org/stable' > /etc/gozpak/repos.conf
+
+gozpak sync          # fetch + verify the repository index
+gozpak get curl      # download and install curl and its dependencies
+gozpak list          # show installed packages
 ```
 
-### Install packages from a repo
+### Build a package from a recipe
 
 ```sh
-# Configure a repository
-echo 'https://repo.gozjaro.org/stable' > /etc/gozpak/repos.conf
+export GOZPAK_PATH=/path/to/gozjaro-repo/packages
 
-# Sync and install
-gozpak sync
-gozpak get firefox
-```
-
-### Build from source
-
-```sh
-# Create a recipe
-gozpak ai-new zlib 1.3.1 https://zlib.net/zlib-1.3.1.tar.gz
-
-# Review, checksum, build, install
-gozpak checksum zlib
-gozpak build zlib
-gozpak install zlib
+gozpak build zlib    # → .gpkg in ~/.cache/gozpak/bin
+gozpak build -b zlib # build only, keep DESTDIR, no .gpkg
 ```
 
 ## Commands
 
-| Command | Short | Description |
-|---------|-------|-------------|
-| `gozpak sync` | `S` | Sync remote repository indices |
-| `gozpak get <pkg>` | `g` | Fetch and install binary packages |
-| `gozpak fetch <pkg>` | `f` | Download binary packages (no install) |
-| `gozpak build <pkg>` | `b` | Build packages from source |
-| `gozpak install <pkg>` | `i` | Install a built package tarball |
-| `gozpak remove <pkg>` | `r` | Remove packages |
-| `gozpak search <pkg>` | `s` | Search for packages in repositories |
-| `gozpak list` | `l` | List installed packages |
-| `gozpak list-remote` | `L` | List packages in remote repos |
-| `gozpak update` | `u` | Update repos and system |
-| `gozpak upgrade` | `U` | Upgrade installed packages |
-| `gozpak alternatives` | `a` | List and swap file alternatives |
-| `gozpak checksum <pkg>` | `c` | Generate checksums |
-| `gozpak download <pkg>` | `d` | Download sources |
-| `gozpak version` | `v` | Print version |
+| Command | Short | Status | Description |
+|---------|-------|--------|-------------|
+| `gozpak sync [url…]` | `S` | ✅ | Fetch and signature-verify repository indices |
+| `gozpak get <pkg…>` | `g` | ✅ | Download and install binary packages (with dependencies) |
+| `gozpak install <pkg…>` | `i` | ✅ | Install packages (same path as `get`) |
+| `gozpak fetch <pkg…>` | `f` | ✅ | Download binary packages without installing |
+| `gozpak list [pkg…]` | `l` | ✅ | List installed packages |
+| `gozpak list-remote [pkg…]` | `L` | ✅ | List packages in synced repositories |
+| `gozpak search <pattern…>` | `s` | ✅ | Search recipes (shell-glob patterns) |
+| `gozpak build <pkg…>` | `b` | ✅ | Build and pack `.gpkg` packages |
+| `gozpak checksum <pkg…>` | `c` | ✅ | Hash sources for a recipe |
+| `gozpak version` | `v` | ✅ | Print version |
+| `gozpak remove <pkg…>` | `r` | 🚧 stub | Remove packages |
+| `gozpak update` | `u` | 🚧 stub | Update repositories and the system |
+| `gozpak upgrade` | `U` | 🚧 stub | Upgrade installed packages |
+| `gozpak download <pkg…>` | `d` | 🚧 stub | Download sources |
+| `gozpak alternatives` | `a` | 🚧 stub | List and swap file alternatives |
+
+Stubs print `not implemented` and exit with status 1.
 
 ### Global flags
 
 | Flag | Description |
 |------|-------------|
 | `-y`, `--yes` | Skip all confirmation prompts |
+| `-b` | (`build` / `repo-build` only) build only, skip the pack step |
 
-## AI extensions
+## Repository maintenance
 
-Generate recipes, fix builds, and check versions with AI assistance.
-Supports multiple backends: Ollama, llama.cpp, Claude, OpenAI, and generic OAuth.
-
-```sh
-# Configure (pick one)
-export GOZPAK_AI_BACKEND=ollama                              # local (default)
-export GOZPAK_AI_BACKEND=claude GOZPAK_AI_API_KEY=sk-...     # Anthropic
-export GOZPAK_AI_BACKEND=openai GOZPAK_AI_API_KEY=sk-...     # OpenAI
-
-# Generate a recipe from a source tarball
-gozpak ai-new curl 8.7.1 https://curl.se/download/curl-8.7.1.tar.xz
-
-# Diagnose a build failure
-gozpak ai-fix curl
-
-# Check for upstream updates
-gozpak ai-update curl
-```
-
-See [docs/ai.md](docs/ai.md) for full configuration reference.
-
-## Repository management
-
-Tools for maintainers to build and publish binary package repositories.
+Commands for the packaging host:
 
 ```sh
-# Batch-build packages
-gozpak repo-build -f packages.list -o ./repo
-
-# Generate repository index
-gozpak repo-index ./repo
-
-# Push to a mirror
-GOZPAK_REPO_PUSH_DEST=user@mirror:/srv/repo gozpak repo-push ./repo
+gozpak keygen ./gozjaro-repo.key             # new ed25519 keypair (prints the public key)
+gozpak repo-build zlib curl                  # build + pack with repo metadata
+gozpak index-build ./repo https://repo.example.org/stable   # → ./repo/index.json
+GOZPAK_SIGN_KEY=./gozjaro-repo.key gozpak sign ./repo         # → ./repo/index.json.sig
 ```
 
-See [docs/repos.md](docs/repos.md) for the repo index format and mirror setup.
+The repository public key is currently embedded in the binary
+(`gozpak_repo::EMBEDDED_PUBKEY`); per-repository keys are a planned follow-up.
+See [docs/repos.md](docs/repos.md) for the index format and mirror setup.
 
-## Package recipe format
+## Recipe format
 
-A package recipe is a directory containing:
+A recipe is a directory with one `recipe.toml` plus optional `patches/` and
+local source files:
 
-| File | Required | Description |
-|------|----------|-------------|
-| `build` | yes | Executable shell script; `$1` = DESTDIR |
-| `version` | yes | `<version> <release>` (e.g. `1.3.1 1`) |
-| `depends` | no | One dependency per line; `make` suffix for build-only |
-| `sources` | no | Source URLs, one per line |
-| `checksums` | no | SHA256 checksums for sources |
-| `meta` | no | Key=value metadata (type, description, license, etc.) |
+```toml
+[package]
+name    = "zlib"
+version = "1.3.1"
+release = 1
+depends = []
 
-### Meta file
+[source]
+urls = [
+    { url = "https://zlib.net/zlib-$VERSION.tar.gz", sha256 = "..." },
+]
 
-Optional metadata for post-install triggers:
-
+[build]
+system = "autotools"
 ```
-type=library
-description=General-purpose compression library
-license=Zlib
-maintainer=user@example.com
-```
 
-Supported types: `kernel-module`, `font`, `icon-theme`, `desktop`, `mime`, `library`.
-
-See [docs/recipes.md](docs/recipes.md) for details.
+Full schema: [docs/recipe-format.md](docs/recipe-format.md). Legacy KISS-style
+3-file recipes (`build` / `version` / `depends` / `sources`) can still be
+read, but not built; a migration tool is planned for M3.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GOZPAK_PATH` | — | Colon-separated source repo paths |
-| `GOZPAK_ROOT` | `/` | System root (for chroot builds) |
-| `GOZPAK_REPOS` | — | Colon-separated remote repo URLs |
-| `GOZPAK_COMPRESS` | `gz` | Tarball compression (gz, xz, zst, bz2, lz, lzma) |
-| `GOZPAK_PROMPT` | `1` | Set to `0` to skip prompts |
-| `GOZPAK_FORCE` | `0` | Force install/remove |
-| `GOZPAK_STRIP` | `1` | Strip binaries (0 to disable) |
-| `GOZPAK_DEBUG` | `0` | Keep build dirs on exit |
-| `GOZPAK_KEEPLOG` | `0` | Keep build logs on success |
-| `GOZPAK_COLOR` | `1` | Colored output (0 to disable) |
-| `GOZPAK_SU` | auto | Privilege escalation tool |
-| `GOZPAK_AI_BACKEND` | `ollama` | AI backend (ollama, llamacpp, claude, openai, oauth) |
-| `GOZPAK_AI_API_KEY` | — | API key for cloud AI backends |
-| `GOZPAK_AI_MODEL` | auto | Model name override |
+| `GOZPAK_ROOT` | `/` | Target root: installed DB at `$GOZPAK_ROOT/var/db/gozpak/installed`, repo config at `$GOZPAK_ROOT/etc/gozpak/repos.conf` |
+| `GOZPAK_PATH` | — | Colon-separated recipe search path |
+| `GOZPAK_REPOS` | — | Colon-separated repository URLs (overrides `repos.conf`) |
+| `GOZPAK_TMPDIR` | `~/.cache/gozpak/proc` | Per-run build/staging directory |
+| `GOZPAK_SIGN_KEY` | — | Path to the 32-byte signing seed (for `sign`) |
+| `XDG_CACHE_HOME` | `~/.cache` | Cache base: `gozpak/repos`, `gozpak/bin`, `gozpak/sources` |
+
+`CFLAGS`, `CPPFLAGS` and `LDFLAGS` are passed through to builds.
+
+## Roadmap
+
+- **M2 (in progress)** — `remove` (needs the per-package file list in the
+  installed DB), `update`/`upgrade`, `download`, `alternatives`, running
+  `gozpak-*` extensions from `$PATH`
+- **M3** — legacy recipe migration tool, `repo-push`, per-repository keys
+
+Details and crate layout: [rs/README.md](rs/README.md).
+
+## Legacy shell version
+
+`./gozpak` is the original POSIX shell implementation (v6.0.0, KISS-derived).
+It is **deprecated** and no longer used on Gozjaro; it stays in the tree for
+reference while the Rust version reaches feature parity. The `contrib/`
+extensions (`gozpak-ai-*`, `gozpak-repo-*`, `gozpak-owns`, …) were written for
+it; the Rust CLI finds them on `$PATH` but does not run them yet.
 
 ## License
 
